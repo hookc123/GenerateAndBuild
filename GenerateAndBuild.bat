@@ -13,7 +13,7 @@ REM -----------------------------
 REM Script version + update source
 REM (edit UPDATE_URL to point at any HTTPS-served copy of this file)
 REM -----------------------------
-set "SCRIPT_VERSION=3.3.0"
+set "SCRIPT_VERSION=2.0.0"
 set "UPDATE_URL=https://raw.githubusercontent.com/hookc123/GenerateAndBuild/main/GenerateAndBuild.bat"
 
 REM -----------------------------
@@ -28,12 +28,38 @@ if errorlevel 1 goto :update_skip
 curl -sSL --max-time 5 "%UPDATE_URL%" -o "%REMOTE_BAT%" >nul 2>&1
 if not exist "%REMOTE_BAT%" goto :update_skip
 
-for /f "usebackq tokens=2 delims==" %%V in (`findstr /c:"SCRIPT_VERSION=" "%REMOTE_BAT%"`) do set "REMOTE_VERSION=%%V"
+for /f "usebackq tokens=2 delims==" %%V in (`findstr /r "SCRIPT_VERSION=[0-9]" "%REMOTE_BAT%"`) do set "REMOTE_VERSION=%%V"
 if defined REMOTE_VERSION set "REMOTE_VERSION=!REMOTE_VERSION:~0,-1!"
 
 if not defined REMOTE_VERSION goto :update_skip
-if "!REMOTE_VERSION!"=="%SCRIPT_VERSION%" goto :update_skip
 
+REM -- Numeric compare of major.minor.patch. Only prompt if remote is strictly newer.
+for /f "tokens=1,2,3 delims=." %%A in ("%SCRIPT_VERSION%") do (
+    set "L_MAJ=%%A"
+    set "L_MIN=%%B"
+    set "L_PAT=%%C"
+)
+for /f "tokens=1,2,3 delims=." %%A in ("!REMOTE_VERSION!") do (
+    set "R_MAJ=%%A"
+    set "R_MIN=%%B"
+    set "R_PAT=%%C"
+)
+if not defined L_MAJ set "L_MAJ=0"
+if not defined L_MIN set "L_MIN=0"
+if not defined L_PAT set "L_PAT=0"
+if not defined R_MAJ set "R_MAJ=0"
+if not defined R_MIN set "R_MIN=0"
+if not defined R_PAT set "R_PAT=0"
+
+if !R_MAJ! LSS !L_MAJ! goto :update_skip
+if !R_MAJ! GTR !L_MAJ! goto :update_prompt
+if !R_MIN! LSS !L_MIN! goto :update_skip
+if !R_MIN! GTR !L_MIN! goto :update_prompt
+if !R_PAT! LSS !L_PAT! goto :update_skip
+if !R_PAT! GTR !L_PAT! goto :update_prompt
+goto :update_skip
+
+:update_prompt
 echo.
 echo ==============================================
 echo   UPDATE AVAILABLE
