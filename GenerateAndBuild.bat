@@ -10,6 +10,82 @@ set "THIS_DIR=%~dp0"
 pushd "%THIS_DIR%" >nul
 
 REM -----------------------------
+REM Script version + update source
+REM (edit UPDATE_URL to point at any HTTPS-served copy of this file)
+REM -----------------------------
+set "SCRIPT_VERSION=0.1.0"
+set "UPDATE_URL=https://raw.githubusercontent.com/hookc123/GenerateAndBuild/main/GenerateAndBuild.bat"
+
+REM -----------------------------
+REM Check for a newer version (silent on failure: offline, timeout, etc.)
+REM -----------------------------
+set "REMOTE_BAT=%TEMP%\GenerateAndBuild.remote.bat"
+set "REMOTE_VERSION="
+
+where curl >nul 2>&1
+if errorlevel 1 goto :update_skip
+
+curl -sSL --max-time 5 "%UPDATE_URL%" -o "%REMOTE_BAT%" >nul 2>&1
+if not exist "%REMOTE_BAT%" goto :update_skip
+
+for /f "usebackq tokens=2 delims==" %%V in (`findstr /b /c:"set \"SCRIPT_VERSION=" "%REMOTE_BAT%"`) do set "REMOTE_VERSION=%%V"
+if defined REMOTE_VERSION set "REMOTE_VERSION=!REMOTE_VERSION:"=!"
+
+if not defined REMOTE_VERSION goto :update_skip
+if "!REMOTE_VERSION!"=="%SCRIPT_VERSION%" goto :update_skip
+
+echo.
+echo ==============================================
+echo   UPDATE AVAILABLE
+echo ==============================================
+echo.
+echo   Current : %SCRIPT_VERSION%
+echo   Latest  : !REMOTE_VERSION!
+echo.
+set /p "DO_UPDATE=Update now? [Y/n]: "
+if /i "!DO_UPDATE!" NEQ "n" goto :update_apply
+
+:update_skip
+if exist "%REMOTE_BAT%" del "%REMOTE_BAT%" >nul 2>&1
+goto :update_done
+
+:update_apply
+set "NEW_BAT=%~dp0GenerateAndBuild.bat.new"
+move /y "%REMOTE_BAT%" "%NEW_BAT%" >nul
+if not exist "%NEW_BAT%" (
+    echo [WARN] Failed to stage update. Continuing with current version.
+    goto :update_done
+)
+
+set "UPDATER=%TEMP%\GenerateAndBuild_update.cmd"
+> "%UPDATER%" (
+    echo @echo off
+    echo timeout /t 1 /nobreak ^>nul
+    echo move /y "%NEW_BAT%" "%~f0" ^>nul 2^>^&1
+    echo if not errorlevel 1 goto moved
+    echo timeout /t 2 /nobreak ^>nul
+    echo move /y "%NEW_BAT%" "%~f0" ^>nul 2^>^&1
+    echo if not errorlevel 1 goto moved
+    echo timeout /t 3 /nobreak ^>nul
+    echo move /y "%NEW_BAT%" "%~f0" ^>nul
+    echo if errorlevel 1 ^(
+    echo   echo [ERROR] Could not replace script: file may be locked.
+    echo   pause
+    echo   exit /b 1
+    echo ^)
+    echo :moved
+    echo start "" "%~f0" __keep
+    echo ^(goto^) 2^>nul ^& del "%%~f0"
+)
+
+echo [INFO] Updating to !REMOTE_VERSION! and relaunching...
+start "" /b cmd /c "%UPDATER%"
+popd >nul
+exit
+
+:update_done
+
+REM -----------------------------
 REM Find exactly one .uproject
 REM -----------------------------
 set "UPROJECT="
