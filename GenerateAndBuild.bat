@@ -13,7 +13,7 @@ REM -----------------------------
 REM Script version + update source
 REM (edit UPDATE_URL to point at any HTTPS-served copy of this file)
 REM -----------------------------
-set "SCRIPT_VERSION=0.1.0"
+set "SCRIPT_VERSION=3.3.0"
 set "UPDATE_URL=https://raw.githubusercontent.com/hookc123/GenerateAndBuild/main/GenerateAndBuild.bat"
 
 REM -----------------------------
@@ -28,8 +28,8 @@ if errorlevel 1 goto :update_skip
 curl -sSL --max-time 5 "%UPDATE_URL%" -o "%REMOTE_BAT%" >nul 2>&1
 if not exist "%REMOTE_BAT%" goto :update_skip
 
-for /f "usebackq tokens=2 delims==" %%V in (`findstr /b /c:"set \"SCRIPT_VERSION=" "%REMOTE_BAT%"`) do set "REMOTE_VERSION=%%V"
-if defined REMOTE_VERSION set "REMOTE_VERSION=!REMOTE_VERSION:"=!"
+for /f "usebackq tokens=2 delims==" %%V in (`findstr /c:"SCRIPT_VERSION=" "%REMOTE_BAT%"`) do set "REMOTE_VERSION=%%V"
+if defined REMOTE_VERSION set "REMOTE_VERSION=!REMOTE_VERSION:~0,-1!"
 
 if not defined REMOTE_VERSION goto :update_skip
 if "!REMOTE_VERSION!"=="%SCRIPT_VERSION%" goto :update_skip
@@ -385,7 +385,7 @@ set "ENGINE_FOLDER=UE_%ENGINE_ID%"
 REM -----------------------------
 REM Find Engine directory dynamically
 REM 1) Try registry GUID mapping (if EngineAssociation is GUID)
-REM 2) BFS all drives for UE_x.y folder (depth 0-2)
+REM 2) Per-drive depth-limited search for UE_x.y folder (depth 0-2)
 REM 3) Prompt user for manual path
 REM -----------------------------
 set "ENGINE_DIR="
@@ -400,8 +400,10 @@ if not defined ENGINE_DIR (
     )
 )
 
-REM (2) Breadth-first search: scan all drives for a folder named UE_x.y
-REM     Searches root level first, then one level deep, then two levels deep
+REM (2) Per-drive depth-limited search: for each drive, check root, then
+REM     one folder deep, then two folders deep, before moving to the next drive.
+REM     Fast for the common case (UE installed on C:) since it never touches
+REM     other drives once a match is found.
 if not defined ENGINE_DIR (
     echo [INFO] Searching for %ENGINE_FOLDER% folder across all drives...
     for %%D in (C D E F G H I J K L M N O P Q R S T U V W X Y Z) do (
