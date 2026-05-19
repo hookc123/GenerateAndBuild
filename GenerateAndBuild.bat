@@ -13,7 +13,7 @@ REM -----------------------------
 REM Script version + update source
 REM (edit UPDATE_URL to point at any HTTPS-served copy of this file)
 REM -----------------------------
-set "SCRIPT_VERSION=2.0.0"
+set "SCRIPT_VERSION=2.0.1"
 set "UPDATE_URL=https://raw.githubusercontent.com/hookc123/GenerateAndBuild/main/GenerateAndBuild.bat"
 
 REM -----------------------------
@@ -84,9 +84,13 @@ if not exist "%NEW_BAT%" (
 )
 
 set "UPDATER=%TEMP%\GenerateAndBuild_update.cmd"
+REM Clear the read-only attribute first: this script usually lives inside a
+REM source-controlled Unreal project (Perforce), so %~f0 is read-only and
+REM the self-replacing move/y would fail with access-denied every time.
 > "%UPDATER%" (
     echo @echo off
     echo timeout /t 1 /nobreak ^>nul
+    echo attrib -r "%~f0" ^>nul 2^>^&1
     echo move /y "%NEW_BAT%" "%~f0" ^>nul 2^>^&1
     echo if not errorlevel 1 goto moved
     echo timeout /t 2 /nobreak ^>nul
