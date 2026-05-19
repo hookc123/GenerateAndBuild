@@ -13,7 +13,7 @@ REM -----------------------------
 REM Script version + update source
 REM (edit UPDATE_URL to point at any HTTPS-served copy of this file)
 REM -----------------------------
-set "SCRIPT_VERSION=2.0.1"
+set "SCRIPT_VERSION=3.0.0"
 set "UPDATE_URL=https://raw.githubusercontent.com/hookc123/GenerateAndBuild/main/GenerateAndBuild.bat"
 
 REM -----------------------------
@@ -368,7 +368,85 @@ if "!HAS_SDK!"=="0" (
 )
 
 :preflight_done
-echo.
+
+REM -----------------------------
+REM Preflight: detect .NET Framework SDK 4.6+ (NetFxSDK)
+REM Independent of the VS C++ workload and Windows SDK above: both can be
+REM present and this still missing, in which case UBT aborts later with
+REM "Unable to instantiate module 'SwarmInterface': Could not find NetFxSDK
+REM install dir". On most machines the key is under the WOW6432Node view,
+REM so both views are probed. A version subkey is not enough on its own:
+REM the install folder must exist and contain the x64 reference libs
+REM (the same thing UBT looks for), so a hollow leftover stub still fails.
+REM -----------------------------
+set "HAS_NETFXSDK=0"
+set "NETFXSDK_VERSION="
+
+for %%V in (4.8.1 4.8 4.7.2 4.7.1 4.7 4.6.2 4.6.1 4.6) do (
+    if "!HAS_NETFXSDK!"=="0" (
+        for %%R in ("HKLM\SOFTWARE\Microsoft\Microsoft SDKs\NETFXSDK" "HKLM\SOFTWARE\WOW6432Node\Microsoft\Microsoft SDKs\NETFXSDK") do (
+            if "!HAS_NETFXSDK!"=="0" (
+                set "NFX_DIR="
+                for /f "tokens=2,*" %%A in ('reg query "%%~R\%%V" /v KitsInstallationFolder 2^>nul ^| find /i "REG_SZ"') do (
+                    set "NFX_DIR=%%B"
+                )
+                if defined NFX_DIR (
+                    if "!NFX_DIR:~-1!"=="\" set "NFX_DIR=!NFX_DIR:~0,-1!"
+                    if exist "!NFX_DIR!\Lib\um\x64\mscoree.lib" (
+                        set "HAS_NETFXSDK=1"
+                        set "NETFXSDK_VERSION=%%V"
+                    )
+                )
+            )
+        )
+    )
+)
+
+if "!HAS_NETFXSDK!"=="1" (
+    echo [OK] Found: .NET Framework SDK !NETFXSDK_VERSION!
+) else (
+    echo [MISSING] .NET Framework SDK 4.6+ not found.
+    echo(
+    echo ==============================================
+    echo   MISSING: .NET Framework SDK 4.6+
+    echo ==============================================
+    echo(
+    echo Visual Studio's C++ workload and the Windows SDK
+    echo were found, but Unreal Build Tool also needs the
+    echo .NET Framework SDK ^(targeting pack^) to compile
+    echo the SwarmInterface module. Without it the build
+    echo fails with "Could not find NetFxSDK install dir".
+    echo(
+    set /p "INSTALL_NETFX=Install the .NET Framework Developer Pack now via winget? [Y/n]: "
+    if /i "!INSTALL_NETFX!" NEQ "n" (
+        echo(
+        echo [INFO] Installing Microsoft .NET Framework Developer Pack...
+        echo        This may take several minutes. An admin prompt may appear.
+        echo(
+        winget install Microsoft.DotNet.Framework.DeveloperPack_4 --accept-source-agreements --accept-package-agreements
+        if !ERRORLEVEL! NEQ 0 (
+            echo(
+            echo [ERROR] winget install failed. Add the ".NET Framework
+            echo         4.8 SDK" ^(or 4.6.2+^) via the Visual Studio
+            echo         Installer ^> Individual components, then re-run.
+            popd >nul
+            pause
+            exit /b 1
+        )
+        echo(
+        echo [OK] Installation complete. Continuing...
+        echo(
+    ) else (
+        echo(
+        echo [INFO] Skipped. Add the ".NET Framework 4.6.2+ SDK" via the
+        echo        Visual Studio Installer ^> Individual components, then re-run.
+        popd >nul
+        pause
+        exit /b 1
+    )
+)
+
+echo(
 echo [INFO] Step 1/2: Generate project files...
 echo(
 
