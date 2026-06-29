@@ -13,7 +13,7 @@ REM -----------------------------
 REM Script version + update source
 REM (edit UPDATE_URL to point at any HTTPS-served copy of this file)
 REM -----------------------------
-set "SCRIPT_VERSION=3.1.0"
+set "SCRIPT_VERSION=4.0.0"
 set "UPDATE_URL=https://raw.githubusercontent.com/hookc123/GenerateAndBuild/main/GenerateAndBuild.bat"
 
 REM -----------------------------
@@ -142,41 +142,10 @@ if %COUNT% GTR 1 (
 
 for %%F in ("%UPROJECT%") do set "PROJECT_NAME=%%~nF"
 
-REM -----------------------------
-REM Locate UnrealVersionSelector (UVS)
-REM -----------------------------
-set "UVS_EXE="
-for /f "tokens=2,*" %%A in ('reg query "HKCR\Unreal.ProjectFile\shell\rungenproj\command" /ve 2^>nul ^| find /i "REG_SZ"') do (
-    set "UVS_CMD=%%B"
-)
-
-if defined UVS_CMD (
-    for %%P in (!UVS_CMD!) do (
-        if exist "%%~fP" (
-            set "UVS_EXE=%%~fP"
-            goto :found_uvs
-        )
-    )
-)
-
-if exist "%ProgramFiles(x86)%\Epic Games\Launcher\Engine\Binaries\Win64\UnrealVersionSelector.exe" (
-    set "UVS_EXE=%ProgramFiles(x86)%\Epic Games\Launcher\Engine\Binaries\Win64\UnrealVersionSelector.exe"
-) else if exist "%ProgramFiles%\Epic Games\Launcher\Engine\Binaries\Win64\UnrealVersionSelector.exe" (
-    set "UVS_EXE=%ProgramFiles%\Epic Games\Launcher\Engine\Binaries\Win64\UnrealVersionSelector.exe"
-)
-
-:found_uvs
-if not defined UVS_EXE (
-    echo [ERROR] UnrealVersionSelector.exe not found.
-    pause
-    popd >nul
-    exit /b 1
-)
-:: ---- SET P4IGNORE ----
+REM ---- SET P4IGNORE ----
 setx P4IGNORE .p4ignore
 echo [INFO] P4IGNORE set to .p4ignore
 echo [INFO] Project : "%UPROJECT%"
-echo [INFO] UVS     : "%UVS_EXE%"
 
 REM -----------------------------
 REM Preflight: detect VS 2022 + C++ workload + Windows SDK
@@ -498,23 +467,6 @@ if "!HAS_NETFXSDK!"=="1" (
     )
 )
 
-echo(
-echo [INFO] Step 1/2: Generate project files...
-echo(
-
-"%UVS_EXE%" /projectfiles "%UPROJECT%"
-set "GEN_ERR=%ERRORLEVEL%"
-
-echo(
-if not "%GEN_ERR%"=="0" (
-    echo [ERROR] Generate project files failed. ErrorLevel=%GEN_ERR%
-    pause
-    popd >nul
-    exit /b %GEN_ERR%
-)
-
-echo [OK] Project files generated.
-
 REM -----------------------------
 REM Read EngineAssociation from .uproject
 REM -----------------------------
@@ -544,15 +496,25 @@ set "ENGINE_FOLDER=UE_%ENGINE_ID%"
 
 REM -----------------------------
 REM Find Engine directory dynamically
-REM 1) Try registry GUID mapping (if EngineAssociation is GUID)
-REM 2) Per-drive depth-limited search for UE_x.y folder (depth 0-2)
-REM 3) Prompt user for manual path
+REM 1) Try Launcher registry (HKLM\SOFTWARE\EpicGames\Unreal Engine\<ver>\InstalledDirectory)
+REM 2) Try source-build registry (HKCU/HKLM \Software\Epic Games\Unreal Engine\Builds\<GUID>)
+REM 3) Per-drive depth-limited search for UE_x.y folder (depth 0-2)
+REM 4) Prompt user for manual path
 REM -----------------------------
 set "ENGINE_DIR="
 
-REM (1) Registry mapping (works when EngineAssociation is a GUID)
-for /f "tokens=2,*" %%A in ('reg query "HKCU\Software\Epic Games\Unreal Engine\Builds" /v "%ENGINE_ID%" 2^>nul ^| find /i "REG_SZ"') do (
+REM (1) Launcher-installed engines: keyed by short version (e.g. "5.7"), not GUID.
+REM     Works for the common case of a Launcher install regardless of whether UVS
+REM     itself knows about the version (old Launcher UVS often pre-dates new engines).
+for /f "tokens=2,*" %%A in ('reg query "HKLM\SOFTWARE\EpicGames\Unreal Engine\%ENGINE_ID%" /v InstalledDirectory 2^>nul ^| find /i "REG_SZ"') do (
     set "ENGINE_DIR=%%B"
+)
+
+REM (2) Source-build registry (GUID associations)
+if not defined ENGINE_DIR (
+    for /f "tokens=2,*" %%A in ('reg query "HKCU\Software\Epic Games\Unreal Engine\Builds" /v "%ENGINE_ID%" 2^>nul ^| find /i "REG_SZ"') do (
+        set "ENGINE_DIR=%%B"
+    )
 )
 if not defined ENGINE_DIR (
     for /f "tokens=2,*" %%A in ('reg query "HKLM\Software\Epic Games\Unreal Engine\Builds" /v "%ENGINE_ID%" 2^>nul ^| find /i "REG_SZ"') do (
@@ -560,7 +522,7 @@ if not defined ENGINE_DIR (
     )
 )
 
-REM (2) Per-drive depth-limited search: for each drive, check root, then
+REM (3) Per-drive depth-limited search: for each drive, check root, then
 REM     one folder deep, then two folders deep, before moving to the next drive.
 REM     Fast for the common case (UE installed on C:) since it never touches
 REM     other drives once a match is found.
@@ -633,71 +595,84 @@ if not exist "%BUILD_BAT%" (
 )
 
 echo [INFO] Engine  : "%ENGINE_DIR%"
+
+REM -----------------------------
+REM Detect UBT layout (UE4 vs UE5) and resolve dotnet for UE5
+REM Done once upfront so both step 1/2 (generate) and step 2/2 (build)
+REM can share the same invocation.
+REM    UE5 -> Engine\Binaries\DotNET\UnrealBuildTool\UnrealBuildTool.dll (invoked via bundled dotnet.exe)
+REM    UE4 -> Engine\Binaries\DotNET\UnrealBuildTool.exe (.NET Framework, invoked directly)
+REM -----------------------------
+set "UBT_DLL=%ENGINE_DIR%\Engine\Binaries\DotNET\UnrealBuildTool\UnrealBuildTool.dll"
+set "UBT_EXE=%ENGINE_DIR%\Engine\Binaries\DotNET\UnrealBuildTool.exe"
+set "UBT_KIND="
+set "DOTNET_EXE="
+
+if exist "%UBT_DLL%" (
+    set "UBT_KIND=UE5"
+    for /f "delims=" %%D in ('dir /b /s "%ENGINE_DIR%\Engine\Binaries\ThirdParty\DotNet\dotnet.exe" 2^>nul') do (
+        if not defined DOTNET_EXE set "DOTNET_EXE=%%D"
+    )
+    if not defined DOTNET_EXE (
+        echo [ERROR] Could not find bundled dotnet.exe under:
+        echo         "%ENGINE_DIR%\Engine\Binaries\ThirdParty\DotNet"
+        pause
+        popd >nul
+        exit /b 1
+    )
+    if not exist "!DOTNET_EXE!" (
+        echo [ERROR] dotnet.exe path does not exist:
+        echo         "!DOTNET_EXE!"
+        pause
+        popd >nul
+        exit /b 1
+    )
+    echo [INFO] UBT     : "%UBT_DLL%" ^(UE5 .NET^)
+    echo [INFO] DotNet  : "!DOTNET_EXE!"
+) else if exist "%UBT_EXE%" (
+    set "UBT_KIND=UE4"
+    echo [INFO] UBT     : "%UBT_EXE%" ^(UE4 .NET Framework^)
+) else (
+    echo [ERROR] UnrealBuildTool not found. Looked for:
+    echo         "%UBT_DLL%"
+    echo         "%UBT_EXE%"
+    pause
+    popd >nul
+    exit /b 1
+)
+
+REM -----------------------------
+REM Step 1/2: Generate project files via UBT
+REM Bypasses UnrealVersionSelector entirely: works whether or not the
+REM Launcher knows about this engine version, and does not write to the
+REM .uproject, so the file can stay read-only under source control.
+REM -----------------------------
+echo(
+echo [INFO] Step 1/2: Generate project files...
+echo(
+
+call :run_ubt -projectfiles -project="%UPROJECT%" -game -rocket -progress
+set "GEN_ERR=%ERRORLEVEL%"
+
+echo(
+if not "%GEN_ERR%"=="0" (
+    echo [ERROR] Generate project files failed. ErrorLevel=%GEN_ERR%
+    pause
+    popd >nul
+    exit /b %GEN_ERR%
+)
+echo [OK] Project files generated.
+
+REM -----------------------------
+REM Step 2/2: Build the editor target
+REM -----------------------------
+echo(
 echo [INFO] Step 2/2: Build %PROJECT_NAME%Editor Win64 Development...
 echo(
 
-REM ---- Detect UBT layout (UE4 vs UE5)
-REM    UE5 -> Engine\Binaries\DotNET\UnrealBuildTool\UnrealBuildTool.dll (invoked via bundled dotnet.exe)
-REM    UE4 -> Engine\Binaries\DotNET\UnrealBuildTool.exe (.NET Framework, invoked directly)
-set "UBT_DLL=%ENGINE_DIR%\Engine\Binaries\DotNET\UnrealBuildTool\UnrealBuildTool.dll"
-set "UBT_EXE=%ENGINE_DIR%\Engine\Binaries\DotNET\UnrealBuildTool.exe"
-if exist "%UBT_DLL%" goto :build_ue5
-if exist "%UBT_EXE%" goto :build_ue4
-
-echo [ERROR] UnrealBuildTool not found. Looked for:
-echo         "%UBT_DLL%"
-echo         "%UBT_EXE%"
-pause
-popd >nul
-exit /b 1
-
-:build_ue5
-REM ---- UE5: find engine-bundled dotnet.exe (versioned subfolders under ThirdParty\DotNet)
-set "DOTNET_EXE="
-for /f "delims=" %%D in ('dir /b /s "%ENGINE_DIR%\Engine\Binaries\ThirdParty\DotNet\dotnet.exe" 2^>nul') do (
-    set "DOTNET_EXE=%%D"
-    goto :got_dotnet
-)
-
-:got_dotnet
-if not defined DOTNET_EXE (
-    echo [ERROR] Could not find bundled dotnet.exe under:
-    echo         "%ENGINE_DIR%\Engine\Binaries\ThirdParty\DotNet"
-    pause
-    popd >nul
-    exit /b 1
-)
-
-REM ---- Sanitize DOTNET_EXE (remove any stray quotes/apostrophes)
-set "DOTNET_EXE=%DOTNET_EXE:"=%"
-set "DOTNET_EXE=%DOTNET_EXE:'=%"
-
-if not exist "%DOTNET_EXE%" (
-    echo [ERROR] dotnet.exe path does not exist:
-    echo         "%DOTNET_EXE%"
-    pause
-    popd >nul
-    exit /b 1
-)
-
-echo [INFO] UBT     : "%UBT_DLL%" (UE5 .NET)
-echo [INFO] DotNet  : "%DOTNET_EXE%"
-echo [INFO] Building: %PROJECT_NAME%Editor Win64 Development
-echo(
-
-"%DOTNET_EXE%" "%UBT_DLL%" %PROJECT_NAME%Editor Win64 Development "%UPROJECT%" -waitmutex
-set "BUILD_ERR=%ERRORLEVEL%"
-goto :build_check
-
-:build_ue4
-echo [INFO] UBT     : "%UBT_EXE%" (UE4 .NET Framework)
-echo [INFO] Building: %PROJECT_NAME%Editor Win64 Development
-echo(
-
-"%UBT_EXE%" %PROJECT_NAME%Editor Win64 Development "%UPROJECT%" -waitmutex
+call :run_ubt %PROJECT_NAME%Editor Win64 Development -project="%UPROJECT%" -waitmutex
 set "BUILD_ERR=%ERRORLEVEL%"
 
-:build_check
 echo(
 if not "%BUILD_ERR%"=="0" (
     echo [ERROR] Build failed. ErrorLevel=%BUILD_ERR%
@@ -706,10 +681,21 @@ if not "%BUILD_ERR%"=="0" (
     exit /b %BUILD_ERR%
 )
 
-:build_ok
 echo ======================================
 echo   BUILD COMPLETE
 echo ======================================
 echo(
 pause
 exit
+
+REM -----------------------------
+REM :run_ubt -- invoke UnrealBuildTool with the launcher matching UBT_KIND.
+REM Forwards all positional args (%*) to UBT and returns its ERRORLEVEL.
+REM -----------------------------
+:run_ubt
+if "%UBT_KIND%"=="UE5" (
+    "%DOTNET_EXE%" "%UBT_DLL%" %*
+) else (
+    "%UBT_EXE%" %*
+)
+exit /b %ERRORLEVEL%
