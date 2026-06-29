@@ -13,7 +13,7 @@ REM -----------------------------
 REM Script version + update source
 REM (edit UPDATE_URL to point at any HTTPS-served copy of this file)
 REM -----------------------------
-set "SCRIPT_VERSION=4.0.0"
+set "SCRIPT_VERSION=4.1.0"
 set "UPDATE_URL=https://raw.githubusercontent.com/hookc123/GenerateAndBuild/main/GenerateAndBuild.bat"
 
 REM -----------------------------
@@ -341,50 +341,35 @@ if "!HAS_SDK!"=="0" (
 :preflight_done
 
 REM -----------------------------
-REM Preflight: probe for a UE-preferred MSVC toolset (14.3x range)
-REM Non-fatal: UE will compile with whatever MSVC is installed but prints
-REM "is not a preferred version" warnings when only newer (14.4x) toolsets
-REM are present, and that combination occasionally produces subtle compile
-REM errors. Warn and name the exact VS Installer component to add; do not
-REM block the build. The 14.3x heuristic covers UE 5.x preferred versions
-REM through UE 5.6 and will need widening as UE moves to newer toolsets.
+REM Preflight: discover a UE-preferred MSVC toolset and pin UBT to it.
+REM UBT auto-selects the newest installed MSVC, which can be too new for the
+REM target engine (for example VS 2026 / MSVC 14.50+ breaks UE 5.0-5.7 with
+REM __has_feature / preprocessor errors). We discover a 14.3x toolset and
+REM hand it to UBT on its command line ONLY, via MSVC_PIN_ARGS in :run_ubt,
+REM so the pin applies to this tool's invocation and never writes to the
+REM project or changes what Visual Studio does. If none is found we warn and
+REM skip the pin, leaving UBT to auto-select as before.
 REM -----------------------------
+set "MSVC_PIN_ARGS="
 if not "!HAS_VS!"=="1" goto :msvc_toolset_done
-set "HAS_PREFERRED_MSVC=0"
+set "PREFERRED_MSVC_VERSION="
+set "PREFERRED_MSVC_ROOT="
 
-if exist "%VSWHERE%" (
-    for /f "usebackq tokens=*" %%P in (`"%VSWHERE%" -products * -version [15.0^,^) -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2^>nul`) do (
-        if "!HAS_PREFERRED_MSVC!"=="0" if exist "%%P\VC\Tools\MSVC" (
-            for /f "delims=" %%T in ('dir /b /ad "%%P\VC\Tools\MSVC\14.3*" 2^>nul') do set "HAS_PREFERRED_MSVC=1"
-        )
-    )
+call :find_preferred_msvc
+
+if defined PREFERRED_MSVC_VERSION (
+    set "MSVC_PIN_ARGS=-Compiler=VisualStudio2022 -CompilerVersion=!PREFERRED_MSVC_VERSION!"
+    echo [OK] Pinning UBT MSVC toolchain: !PREFERRED_MSVC_VERSION!
+    echo        !PREFERRED_MSVC_ROOT!
+    goto :msvc_toolset_done
 )
 
-REM Fallback filesystem scan, mirroring the VS-detection fallback, for VS
-REM editions vswhere does not yet know about (e.g. VS 2026 Preview).
-if "!HAS_PREFERRED_MSVC!"=="0" (
-    for %%R in ("%ProgramFiles%\Microsoft Visual Studio" "%ProgramFiles(x86)%\Microsoft Visual Studio") do (
-        if "!HAS_PREFERRED_MSVC!"=="0" if exist %%R (
-            for /f "delims=" %%V in ('dir /b /ad %%R 2^>nul') do (
-                if "!HAS_PREFERRED_MSVC!"=="0" (
-                    for %%E in (Community Professional Enterprise BuildTools) do (
-                        if "!HAS_PREFERRED_MSVC!"=="0" if exist "%%~R\%%V\%%E\VC\Tools\MSVC\" (
-                            for /f "delims=" %%T in ('dir /b /ad "%%~R\%%V\%%E\VC\Tools\MSVC\14.3*" 2^>nul') do set "HAS_PREFERRED_MSVC=1"
-                        )
-                    )
-                )
-            )
-        )
-    )
-)
-
-if "!HAS_PREFERRED_MSVC!"=="1" goto :msvc_toolset_done
 echo(
 echo [WARN] No UE-preferred MSVC toolset ^(v14.3x^) detected.
-echo        Unreal will warn the installed toolset is "not a preferred
-echo        version" and may produce subtle compile errors. In Visual
-echo        Studio Installer ^> Modify ^> Individual components, add
-echo        "MSVC v143 - VS 2022 C++ x64/x86 build tools ^(v14.38-17.8^)".
+echo        UBT will auto-select the newest installed compiler, which may be
+echo        too new for this engine and fail the build. In Visual Studio
+echo        Installer ^> Modify ^> Individual components, add "MSVC v143 -
+echo        VS 2022 C++ x64/x86 build tools ^(v14.38-17.8^)".
 echo        Continuing anyway.
 echo(
 
@@ -689,13 +674,70 @@ pause
 exit
 
 REM -----------------------------
+REM :find_preferred_msvc -- discover a UE-safe MSVC toolchain version string.
+REM Prefer 14.38 first (the common UE 5.3-5.7 safe toolchain), then fall back
+REM to any 14.3x. Sets PREFERRED_MSVC_VERSION + PREFERRED_MSVC_ROOT when found.
+REM -----------------------------
+:find_preferred_msvc
+if exist "%VSWHERE%" (
+    for /f "usebackq tokens=*" %%P in (`"%VSWHERE%" -products * -version [15.0^,^) -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2^>nul`) do (
+        call :scan_msvc_root "%%P\VC\Tools\MSVC"
+    )
+)
+
+if defined PREFERRED_MSVC_VERSION goto :find_preferred_msvc_done
+
+REM Fallback filesystem scan, mirroring the VS-detection fallback, for VS
+REM editions vswhere does not yet know about (e.g. VS 2026).
+for %%R in ("%ProgramFiles%\Microsoft Visual Studio" "%ProgramFiles(x86)%\Microsoft Visual Studio") do (
+    if exist %%R (
+        for /f "delims=" %%V in ('dir /b /ad %%R 2^>nul') do (
+            for %%E in (Community Professional Enterprise BuildTools) do (
+                call :scan_msvc_root "%%~R\%%V\%%E\VC\Tools\MSVC"
+            )
+        )
+    )
+)
+
+:find_preferred_msvc_done
+exit /b 0
+
+REM -----------------------------
+REM :scan_msvc_root <path> -- set PREFERRED_MSVC_VERSION from a Tools\MSVC dir.
+REM Highest 14.38 patch first, else highest 14.3x. No-op once already set.
+REM -----------------------------
+:scan_msvc_root
+if defined PREFERRED_MSVC_VERSION exit /b 0
+set "MSVC_SCAN_ROOT=%~1"
+if not exist "!MSVC_SCAN_ROOT!\" exit /b 0
+
+for /f "delims=" %%T in ('dir /b /ad /o-n "!MSVC_SCAN_ROOT!\14.38*" 2^>nul') do (
+    if not defined PREFERRED_MSVC_VERSION (
+        set "PREFERRED_MSVC_VERSION=%%T"
+        set "PREFERRED_MSVC_ROOT=!MSVC_SCAN_ROOT!\%%T"
+    )
+)
+
+if defined PREFERRED_MSVC_VERSION exit /b 0
+
+for /f "delims=" %%T in ('dir /b /ad /o-n "!MSVC_SCAN_ROOT!\14.3*" 2^>nul') do (
+    if not defined PREFERRED_MSVC_VERSION (
+        set "PREFERRED_MSVC_VERSION=%%T"
+        set "PREFERRED_MSVC_ROOT=!MSVC_SCAN_ROOT!\%%T"
+    )
+)
+
+exit /b 0
+
+REM -----------------------------
 REM :run_ubt -- invoke UnrealBuildTool with the launcher matching UBT_KIND.
-REM Forwards all positional args (%*) to UBT and returns its ERRORLEVEL.
+REM Forwards all positional args (%*) to UBT, appends the MSVC pin (if any),
+REM and returns UBT's ERRORLEVEL.
 REM -----------------------------
 :run_ubt
 if "%UBT_KIND%"=="UE5" (
-    "%DOTNET_EXE%" "%UBT_DLL%" %*
+    "%DOTNET_EXE%" "%UBT_DLL%" %* !MSVC_PIN_ARGS!
 ) else (
-    "%UBT_EXE%" %*
+    "%UBT_EXE%" %* !MSVC_PIN_ARGS!
 )
 exit /b %ERRORLEVEL%
