@@ -13,7 +13,7 @@ REM -----------------------------
 REM Script version + update source
 REM (edit UPDATE_URL to point at any HTTPS-served copy of this file)
 REM -----------------------------
-set "SCRIPT_VERSION=4.1.1"
+set "SCRIPT_VERSION=4.1.2"
 set "UPDATE_URL=https://raw.githubusercontent.com/hookc123/GenerateAndBuild/main/GenerateAndBuild.bat"
 
 REM -----------------------------
@@ -344,9 +344,12 @@ REM -----------------------------
 REM Preflight: discover a UE-preferred MSVC toolset and pin UBT to it.
 REM UBT auto-selects the newest installed MSVC, which can be too new for the
 REM target engine (for example VS 2026 / MSVC 14.50+ breaks UE 5.0-5.7 with
-REM __has_feature / preprocessor errors). We discover a 14.3x toolset (or, if
-REM none exists, fall back to the highest 14.4x) and hand it to UBT on its
-REM command line ONLY, via MSVC_PIN_ARGS in :run_ubt, so the pin applies to
+REM __has_feature / preprocessor errors). We discover a toolset by tier:
+REM 14.38/14.39 first (every UE 5.x accepts them, and UE 5.7 requires at
+REM least 14.38), else the highest 14.4x, else the highest older 14.3x
+REM (14.30-14.37 sit below UE 5.7's minimum, so they rank last). The result
+REM is handed to UBT on its command line ONLY, via MSVC_PIN_ARGS in :run_ubt,
+REM so the pin applies to
 REM this tool's invocation and never writes to the project or changes what
 REM Visual Studio does. If nothing usable is found we warn and skip the pin,
 REM leaving UBT to auto-select as before.
@@ -357,6 +360,8 @@ set "PREFERRED_MSVC_VERSION="
 set "PREFERRED_MSVC_ROOT="
 set "FALLBACK_MSVC_VERSION="
 set "FALLBACK_MSVC_ROOT="
+set "LASTRESORT_MSVC_VERSION="
+set "LASTRESORT_MSVC_ROOT="
 
 call :find_preferred_msvc
 
@@ -369,9 +374,19 @@ if defined PREFERRED_MSVC_VERSION (
 
 if defined FALLBACK_MSVC_VERSION (
     set "MSVC_PIN_ARGS=-Compiler=VisualStudio2022 -CompilerVersion=!FALLBACK_MSVC_VERSION!"
-    echo [OK] No UE-preferred ^(v14.3x^) MSVC found; pinning best available: !FALLBACK_MSVC_VERSION!
+    echo [OK] No UE-preferred ^(v14.38/v14.39^) MSVC found; pinning best available: !FALLBACK_MSVC_VERSION!
     echo        !FALLBACK_MSVC_ROOT!
     echo        Build will run; add the "v14.38" component later for the cleanest result.
+    goto :msvc_toolset_done
+)
+
+if defined LASTRESORT_MSVC_VERSION (
+    set "MSVC_PIN_ARGS=-Compiler=VisualStudio2022 -CompilerVersion=!LASTRESORT_MSVC_VERSION!"
+    echo [WARN] Only an older MSVC toolset found; pinning: !LASTRESORT_MSVC_VERSION!
+    echo        !LASTRESORT_MSVC_ROOT!
+    echo        UE 5.7+ requires v14.38 or newer and will reject this toolset.
+    echo        If the build fails, add "MSVC v143 - VS 2022 C++ x64/x86 build
+    echo        tools ^(v14.38-17.8^)" in Visual Studio Installer.
     goto :msvc_toolset_done
 )
 
@@ -686,9 +701,10 @@ exit
 
 REM -----------------------------
 REM :find_preferred_msvc -- discover a UE-safe MSVC toolchain version string.
-REM Prefers 14.38, then any 14.3x, into PREFERRED_MSVC_*. If neither exists it
-REM records the highest 14.4x into FALLBACK_MSVC_* so the caller can still pin a
-REM valid VS 2022 toolset instead of letting UBT pick a too-new compiler.
+REM Prefers 14.38 then 14.39 into PREFERRED_MSVC_*. Failing that, records the
+REM highest 14.4x into FALLBACK_MSVC_* and the highest older 14.3x into
+REM LASTRESORT_MSVC_* so the caller can still pin a valid VS 2022 toolset
+REM instead of letting UBT pick a too-new compiler.
 REM -----------------------------
 :find_preferred_msvc
 if exist "%VSWHERE%" (
@@ -716,8 +732,9 @@ exit /b 0
 
 REM -----------------------------
 REM :scan_msvc_root <path> -- scan one Tools\MSVC dir. Highest 14.38 then
-REM highest 14.3x -> PREFERRED_MSVC_*; failing that, highest 14.4x ->
-REM FALLBACK_MSVC_*. PREFERRED is a no-op once set; first root wins each tier.
+REM highest 14.39 -> PREFERRED_MSVC_*; failing that, highest 14.4x ->
+REM FALLBACK_MSVC_*; failing that, highest older 14.3x -> LASTRESORT_MSVC_*.
+REM PREFERRED is a no-op once set; first root wins each tier.
 REM -----------------------------
 :scan_msvc_root
 if defined PREFERRED_MSVC_VERSION exit /b 0
@@ -733,7 +750,7 @@ for /f "delims=" %%T in ('dir /b /ad /o-n "!MSVC_SCAN_ROOT!\14.38*" 2^>nul') do 
 
 if defined PREFERRED_MSVC_VERSION exit /b 0
 
-for /f "delims=" %%T in ('dir /b /ad /o-n "!MSVC_SCAN_ROOT!\14.3*" 2^>nul') do (
+for /f "delims=" %%T in ('dir /b /ad /o-n "!MSVC_SCAN_ROOT!\14.39*" 2^>nul') do (
     if not defined PREFERRED_MSVC_VERSION (
         set "PREFERRED_MSVC_VERSION=%%T"
         set "PREFERRED_MSVC_ROOT=!MSVC_SCAN_ROOT!\%%T"
@@ -742,16 +759,29 @@ for /f "delims=" %%T in ('dir /b /ad /o-n "!MSVC_SCAN_ROOT!\14.3*" 2^>nul') do (
 
 if defined PREFERRED_MSVC_VERSION exit /b 0
 
-REM No preferred 14.3x in this root. Record the highest 14.4x as a fallback
+REM No 14.38/14.39 in this root. Record the highest 14.4x as a fallback
 REM (still a VS 2022 toolset, so -Compiler=VisualStudio2022 stays valid), so a
 REM machine with only current VS 2022 (which ships 14.4x, not 14.38) still gets
 REM a safe pin instead of UBT defaulting to a too-new compiler. First root with
-REM a 14.4x wins; a later root holding a real 14.3x still overrides via PREFERRED.
+REM a 14.4x wins; a later root holding a 14.38/14.39 still overrides via PREFERRED.
 if defined FALLBACK_MSVC_VERSION exit /b 0
 for /f "delims=" %%T in ('dir /b /ad /o-n "!MSVC_SCAN_ROOT!\14.4*" 2^>nul') do (
     if not defined FALLBACK_MSVC_VERSION (
         set "FALLBACK_MSVC_VERSION=%%T"
         set "FALLBACK_MSVC_ROOT=!MSVC_SCAN_ROOT!\%%T"
+    )
+)
+
+if defined FALLBACK_MSVC_VERSION exit /b 0
+
+REM No 14.4x either. Record the highest remaining 14.3x (14.30-14.37) as a
+REM last resort: those build UE 5.0-5.6 fine but sit below UE 5.7's minimum
+REM of 14.38, so they must never outrank a 14.4x that UBT would have accepted.
+if defined LASTRESORT_MSVC_VERSION exit /b 0
+for /f "delims=" %%T in ('dir /b /ad /o-n "!MSVC_SCAN_ROOT!\14.3*" 2^>nul') do (
+    if not defined LASTRESORT_MSVC_VERSION (
+        set "LASTRESORT_MSVC_VERSION=%%T"
+        set "LASTRESORT_MSVC_ROOT=!MSVC_SCAN_ROOT!\%%T"
     )
 )
 

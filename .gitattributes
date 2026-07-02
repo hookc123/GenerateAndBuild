@@ -1,0 +1,3 @@
+# Committed as raw CRLF bytes: cmd.exe's goto/label scanner misfires on
+# LF-only .bat files, and GitHub raw downloads serve the blob verbatim.
+GenerateAndBuild.bat -text
