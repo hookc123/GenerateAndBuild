@@ -13,7 +13,7 @@ REM -----------------------------
 REM Script version + update source
 REM (edit UPDATE_URL to point at any HTTPS-served copy of this file)
 REM -----------------------------
-set "SCRIPT_VERSION=4.1.2"
+set "SCRIPT_VERSION=4.1.3"
 set "UPDATE_URL=https://raw.githubusercontent.com/hookc123/GenerateAndBuild/main/GenerateAndBuild.bat"
 
 REM -----------------------------
@@ -376,7 +376,9 @@ if defined FALLBACK_MSVC_VERSION (
     set "MSVC_PIN_ARGS=-Compiler=VisualStudio2022 -CompilerVersion=!FALLBACK_MSVC_VERSION!"
     echo [OK] No UE-preferred ^(v14.38/v14.39^) MSVC found; pinning best available: !FALLBACK_MSVC_VERSION!
     echo        !FALLBACK_MSVC_ROOT!
-    echo        Build will run; add the "v14.38" component later for the cleanest result.
+    echo        NOTE: UE 5.3 and older cannot build with v14.40+ compilers. If the
+    echo        build fails, add the "v14.38" component in Visual Studio Installer
+    echo        and rerun this tool.
     goto :msvc_toolset_done
 )
 
@@ -385,8 +387,8 @@ if defined LASTRESORT_MSVC_VERSION (
     echo [WARN] Only an older MSVC toolset found; pinning: !LASTRESORT_MSVC_VERSION!
     echo        !LASTRESORT_MSVC_ROOT!
     echo        UE 5.7+ requires v14.38 or newer and will reject this toolset.
-    echo        If the build fails, add "MSVC v143 - VS 2022 C++ x64/x86 build
-    echo        tools ^(v14.38-17.8^)" in Visual Studio Installer.
+    echo        If the build fails, add the "v14.38" component in Visual Studio
+    echo        Installer and rerun this tool.
     goto :msvc_toolset_done
 )
 
@@ -734,7 +736,10 @@ REM -----------------------------
 REM :scan_msvc_root <path> -- scan one Tools\MSVC dir. Highest 14.38 then
 REM highest 14.39 -> PREFERRED_MSVC_*; failing that, highest 14.4x ->
 REM FALLBACK_MSVC_*; failing that, highest older 14.3x -> LASTRESORT_MSVC_*.
-REM PREFERRED is a no-op once set; first root wins each tier.
+REM PREFERRED is a no-op once set; first root wins each tier. A version folder
+REM only counts if it actually contains the compiler (bin\Hostx64\x64\cl.exe):
+REM uninstalling a VS component can leave a hollow folder behind, and pinning
+REM one makes UBT fail with "Unable to find valid toolchain".
 REM -----------------------------
 :scan_msvc_root
 if defined PREFERRED_MSVC_VERSION exit /b 0
@@ -742,7 +747,7 @@ set "MSVC_SCAN_ROOT=%~1"
 if not exist "!MSVC_SCAN_ROOT!\" exit /b 0
 
 for /f "delims=" %%T in ('dir /b /ad /o-n "!MSVC_SCAN_ROOT!\14.38*" 2^>nul') do (
-    if not defined PREFERRED_MSVC_VERSION (
+    if not defined PREFERRED_MSVC_VERSION if exist "!MSVC_SCAN_ROOT!\%%T\bin\Hostx64\x64\cl.exe" (
         set "PREFERRED_MSVC_VERSION=%%T"
         set "PREFERRED_MSVC_ROOT=!MSVC_SCAN_ROOT!\%%T"
     )
@@ -751,7 +756,7 @@ for /f "delims=" %%T in ('dir /b /ad /o-n "!MSVC_SCAN_ROOT!\14.38*" 2^>nul') do 
 if defined PREFERRED_MSVC_VERSION exit /b 0
 
 for /f "delims=" %%T in ('dir /b /ad /o-n "!MSVC_SCAN_ROOT!\14.39*" 2^>nul') do (
-    if not defined PREFERRED_MSVC_VERSION (
+    if not defined PREFERRED_MSVC_VERSION if exist "!MSVC_SCAN_ROOT!\%%T\bin\Hostx64\x64\cl.exe" (
         set "PREFERRED_MSVC_VERSION=%%T"
         set "PREFERRED_MSVC_ROOT=!MSVC_SCAN_ROOT!\%%T"
     )
@@ -766,7 +771,7 @@ REM a safe pin instead of UBT defaulting to a too-new compiler. First root with
 REM a 14.4x wins; a later root holding a 14.38/14.39 still overrides via PREFERRED.
 if defined FALLBACK_MSVC_VERSION exit /b 0
 for /f "delims=" %%T in ('dir /b /ad /o-n "!MSVC_SCAN_ROOT!\14.4*" 2^>nul') do (
-    if not defined FALLBACK_MSVC_VERSION (
+    if not defined FALLBACK_MSVC_VERSION if exist "!MSVC_SCAN_ROOT!\%%T\bin\Hostx64\x64\cl.exe" (
         set "FALLBACK_MSVC_VERSION=%%T"
         set "FALLBACK_MSVC_ROOT=!MSVC_SCAN_ROOT!\%%T"
     )
@@ -779,7 +784,7 @@ REM last resort: those build UE 5.0-5.6 fine but sit below UE 5.7's minimum
 REM of 14.38, so they must never outrank a 14.4x that UBT would have accepted.
 if defined LASTRESORT_MSVC_VERSION exit /b 0
 for /f "delims=" %%T in ('dir /b /ad /o-n "!MSVC_SCAN_ROOT!\14.3*" 2^>nul') do (
-    if not defined LASTRESORT_MSVC_VERSION (
+    if not defined LASTRESORT_MSVC_VERSION if exist "!MSVC_SCAN_ROOT!\%%T\bin\Hostx64\x64\cl.exe" (
         set "LASTRESORT_MSVC_VERSION=%%T"
         set "LASTRESORT_MSVC_ROOT=!MSVC_SCAN_ROOT!\%%T"
     )
