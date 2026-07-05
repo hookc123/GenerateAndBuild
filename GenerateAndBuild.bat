@@ -13,8 +13,25 @@ REM -----------------------------
 REM Script version + update source
 REM (edit UPDATE_URL to point at any HTTPS-served copy of this file)
 REM -----------------------------
-set "SCRIPT_VERSION=4.1.3"
+set "SCRIPT_VERSION=4.2.0"
 set "UPDATE_URL=https://raw.githubusercontent.com/hookc123/GenerateAndBuild/main/GenerateAndBuild.bat"
+
+REM -----------------------------
+REM MSVC toolchain compatibility knobs (engine-aware pin).
+REM v14.38/v14.39 is the universal window every UE 5.x accepts and is ALWAYS
+REM preferred, so these two knobs only decide the fallback when no v14.38/39 is
+REM installed:
+REM   MSVC_NO_1440_MAX_MINOR : UE 5.x with minor <= this cannot build on MSVC
+REM                            v14.40+, so the pin stays at v14.39 or lower.
+REM   MSVC_NEED_1438_MIN_MINOR : UE 5.x with minor >= this needs v14.38+, so
+REM                              older toolsets are treated as too old.
+REM Both default to what is currently known (only UE 5.3 and older proven to
+REM reject v14.40+; UE 5.7+ proven to need v14.38+). If testing shows another
+REM version fails, just bump the number: e.g. if 5.6 also breaks on v14.40+,
+REM set MSVC_NO_1440_MAX_MINOR=6.
+REM -----------------------------
+set "MSVC_NO_1440_MAX_MINOR=3"
+set "MSVC_NEED_1438_MIN_MINOR=7"
 
 REM -----------------------------
 REM Check for a newer version (silent on failure: offline, timeout, etc.)
@@ -341,69 +358,6 @@ if "!HAS_SDK!"=="0" (
 :preflight_done
 
 REM -----------------------------
-REM Preflight: discover a UE-preferred MSVC toolset and pin UBT to it.
-REM UBT auto-selects the newest installed MSVC, which can be too new for the
-REM target engine (for example VS 2026 / MSVC 14.50+ breaks UE 5.0-5.7 with
-REM __has_feature / preprocessor errors). We discover a toolset by tier:
-REM 14.38/14.39 first (every UE 5.x accepts them, and UE 5.7 requires at
-REM least 14.38), else the highest 14.4x, else the highest older 14.3x
-REM (14.30-14.37 sit below UE 5.7's minimum, so they rank last). The result
-REM is handed to UBT on its command line ONLY, via MSVC_PIN_ARGS in :run_ubt,
-REM so the pin applies to
-REM this tool's invocation and never writes to the project or changes what
-REM Visual Studio does. If nothing usable is found we warn and skip the pin,
-REM leaving UBT to auto-select as before.
-REM -----------------------------
-set "MSVC_PIN_ARGS="
-if not "!HAS_VS!"=="1" goto :msvc_toolset_done
-set "PREFERRED_MSVC_VERSION="
-set "PREFERRED_MSVC_ROOT="
-set "FALLBACK_MSVC_VERSION="
-set "FALLBACK_MSVC_ROOT="
-set "LASTRESORT_MSVC_VERSION="
-set "LASTRESORT_MSVC_ROOT="
-
-call :find_preferred_msvc
-
-if defined PREFERRED_MSVC_VERSION (
-    set "MSVC_PIN_ARGS=-Compiler=VisualStudio2022 -CompilerVersion=!PREFERRED_MSVC_VERSION!"
-    echo [OK] Pinning UBT MSVC toolchain: !PREFERRED_MSVC_VERSION!
-    echo        !PREFERRED_MSVC_ROOT!
-    goto :msvc_toolset_done
-)
-
-if defined FALLBACK_MSVC_VERSION (
-    set "MSVC_PIN_ARGS=-Compiler=VisualStudio2022 -CompilerVersion=!FALLBACK_MSVC_VERSION!"
-    echo [OK] No UE-preferred ^(v14.38/v14.39^) MSVC found; pinning best available: !FALLBACK_MSVC_VERSION!
-    echo        !FALLBACK_MSVC_ROOT!
-    echo        NOTE: UE 5.3 and older cannot build with v14.40+ compilers. If the
-    echo        build fails, add the "v14.38" component in Visual Studio Installer
-    echo        and rerun this tool.
-    goto :msvc_toolset_done
-)
-
-if defined LASTRESORT_MSVC_VERSION (
-    set "MSVC_PIN_ARGS=-Compiler=VisualStudio2022 -CompilerVersion=!LASTRESORT_MSVC_VERSION!"
-    echo [WARN] Only an older MSVC toolset found; pinning: !LASTRESORT_MSVC_VERSION!
-    echo        !LASTRESORT_MSVC_ROOT!
-    echo        UE 5.7+ requires v14.38 or newer and will reject this toolset.
-    echo        If the build fails, add the "v14.38" component in Visual Studio
-    echo        Installer and rerun this tool.
-    goto :msvc_toolset_done
-)
-
-echo(
-echo [WARN] No UE-compatible MSVC toolset ^(v14.3x or v14.4x^) detected.
-echo        UBT will auto-select the newest installed compiler, which may be
-echo        too new for this engine and fail the build. In Visual Studio
-echo        Installer ^> Modify ^> Individual components, add "MSVC v143 -
-echo        VS 2022 C++ x64/x86 build tools ^(v14.38-17.8^)".
-echo        Continuing anyway.
-echo(
-
-:msvc_toolset_done
-
-REM -----------------------------
 REM Preflight: detect .NET Framework SDK 4.6+ (NetFxSDK)
 REM Independent of the VS C++ workload and Windows SDK above: both can be
 REM present and this still missing, in which case UBT aborts later with
@@ -610,6 +564,73 @@ if not exist "%BUILD_BAT%" (
 echo [INFO] Engine  : "%ENGINE_DIR%"
 
 REM -----------------------------
+REM Determine the engine's major.minor version (drives the toolchain cap).
+REM Build.version is authoritative for both Launcher and source builds; the
+REM EngineAssociation string is only a fallback (a raw version for Launcher
+REM installs but a GUID for source builds, so not always usable).
+REM -----------------------------
+set "ENGINE_MAJOR="
+set "ENGINE_MINOR="
+set "BUILD_VERSION_FILE=%ENGINE_DIR%\Engine\Build\Build.version"
+if exist "%BUILD_VERSION_FILE%" (
+    for /f "tokens=2 delims=:," %%A in ('findstr /i /c:"MajorVersion" "%BUILD_VERSION_FILE%"') do set "ENGINE_MAJOR=%%A"
+    for /f "tokens=2 delims=:," %%A in ('findstr /i /c:"MinorVersion" "%BUILD_VERSION_FILE%"') do set "ENGINE_MINOR=%%A"
+)
+if defined ENGINE_MAJOR set "ENGINE_MAJOR=!ENGINE_MAJOR: =!"
+if defined ENGINE_MINOR set "ENGINE_MINOR=!ENGINE_MINOR: =!"
+
+REM Fallback: parse a dotted EngineAssociation like "5.3"
+if not defined ENGINE_MAJOR (
+    for /f "tokens=1,2 delims=." %%A in ("%ENGINE_ID%") do (
+        set "ENGINE_MAJOR=%%A"
+        set "ENGINE_MINOR=%%B"
+    )
+)
+
+REM Force numeric or treat the version as unknown (source-build GUID, etc.).
+set "b_ver_numeric=1"
+echo !ENGINE_MAJOR!|findstr /r "^[0-9][0-9]*$" >nul || set "b_ver_numeric=0"
+echo !ENGINE_MINOR!|findstr /r "^[0-9][0-9]*$" >nul || set "b_ver_numeric=0"
+if "!b_ver_numeric!"=="0" (
+    set "ENGINE_MAJOR=0"
+    set "ENGINE_MINOR=0"
+)
+if not defined ENGINE_MAJOR set "ENGINE_MAJOR=0"
+if not defined ENGINE_MINOR set "ENGINE_MINOR=0"
+
+REM Classify the engine into an MSVC-compatibility band (knobs set near the top):
+REM   LOW  : reject v14.40+     (UE 5.x minor <= MSVC_NO_1440_MAX_MINOR)
+REM   HIGH : require v14.38+     (UE 5.x minor >= MSVC_NEED_1438_MIN_MINOR)
+REM   MID  : no cap, no floor    (everything else, incl. UE4 and unknown)
+set "ENGINE_BAND=MID"
+if "!ENGINE_MAJOR!"=="5" (
+    if !ENGINE_MINOR! LEQ !MSVC_NO_1440_MAX_MINOR! set "ENGINE_BAND=LOW"
+    if !ENGINE_MINOR! GEQ !MSVC_NEED_1438_MIN_MINOR! set "ENGINE_BAND=HIGH"
+)
+if not "!ENGINE_MAJOR!"=="0" echo [INFO] Engine version: !ENGINE_MAJOR!.!ENGINE_MINOR! ^(toolchain band: !ENGINE_BAND!^)
+
+REM -----------------------------
+REM Preflight: pick a UE-safe MSVC toolset and pin UBT to it (engine-aware).
+REM UBT otherwise auto-selects the newest installed MSVC, which can be too new
+REM for the target engine (VS 2026 / MSVC 14.50+ breaks UE 5.0-5.7, and any
+REM v14.40+ breaks the engines in the LOW band). v14.38/v14.39 is the universal
+REM window every UE 5.x accepts, so it is always preferred; otherwise the
+REM highest toolset the engine's band allows is used. The pick is handed to UBT
+REM on its command line ONLY (via MSVC_PIN_ARGS in :run_ubt), never written to
+REM the project. All installed v14.x toolsets are collected (highest first) so
+REM the build step can offer a downgrade if the pin turns out too new.
+REM -----------------------------
+set "MSVC_PIN_ARGS="
+set "PIN_VER="
+set "PIN_ROOT="
+set "PIN_IDX=0"
+set "MSVC_COUNT=0"
+if "!HAS_VS!"=="1" (
+    call :collect_msvc_toolsets
+    call :select_msvc_pin
+)
+
+REM -----------------------------
 REM Detect UBT layout (UE4 vs UE5) and resolve dotnet for UE5
 REM Done once upfront so both step 1/2 (generate) and step 2/2 (build)
 REM can share the same invocation.
@@ -677,23 +698,76 @@ if not "%GEN_ERR%"=="0" (
 echo [OK] Project files generated.
 
 REM -----------------------------
-REM Step 2/2: Build the editor target
+REM Step 2/2: Build the editor target.
+REM On failure, offer to retry with a lower MSVC toolset: auto-retry once with
+REM the next-lower installed toolset, then drop to a manual picker. This only
+REM helps a toolchain-mismatch failure (a too-new compiler); a genuine code
+REM error keeps failing and the user can quit the picker.
 REM -----------------------------
 echo(
 echo [INFO] Step 2/2: Build %PROJECT_NAME%Editor Win64 Development...
 echo(
 
-call :run_ubt %PROJECT_NAME%Editor Win64 Development -project="%UPROJECT%" -waitmutex
-set "BUILD_ERR=%ERRORLEVEL%"
+set "AUTO_TRIED="
 
+:do_build
+call :run_ubt %PROJECT_NAME%Editor Win64 Development -project="%UPROJECT%" -waitmutex
+set "BUILD_ERR=!ERRORLEVEL!"
 echo(
-if not "%BUILD_ERR%"=="0" (
-    echo [ERROR] Build failed. ErrorLevel=%BUILD_ERR%
-    popd >nul
-    pause
-    exit /b %BUILD_ERR%
+if "!BUILD_ERR!"=="0" goto :build_ok
+
+echo [ERROR] Build failed. ErrorLevel=!BUILD_ERR!
+
+REM Is there a lower toolset to fall back to? (array is sorted high -> low)
+set "b_have_lower="
+if !MSVC_COUNT! GEQ 1 if !PIN_IDX! GEQ 1 if !PIN_IDX! LSS !MSVC_COUNT! set "b_have_lower=1"
+
+REM Auto-retry once with the next-lower toolset.
+if not defined AUTO_TRIED if defined b_have_lower (
+    set "AUTO_TRIED=1"
+    set /a _NEXT=!PIN_IDX!+1
+    call :set_pin !_NEXT!
+    echo(
+    echo [INFO] Auto-retrying with next-lower MSVC toolset: !PIN_VER!
+    echo(
+    goto :do_build
 )
 
+REM No lower toolset, or the auto-retry already ran: offer the manual picker.
+if !MSVC_COUNT! LSS 1 goto :build_give_up
+if not defined b_have_lower goto :build_give_up
+
+:downgrade_menu
+echo(
+echo   The build failed with the current toolchain pin. If this is a
+echo   "compiler too new" mismatch, rebuilding with an older MSVC toolset
+echo   often fixes it. Installed toolsets ^(newest first^):
+echo(
+for /L %%i in (1,1,!MSVC_COUNT!) do call :print_toolset %%i
+echo(
+set "PICK="
+set /p "PICK=Pick a toolset to rebuild with [1-!MSVC_COUNT!], or Q to quit: "
+if /i "!PICK!"=="Q" goto :build_give_up
+set "_valid="
+for /L %%i in (1,1,!MSVC_COUNT!) do if "%%i"=="!PICK!" set "_valid=1"
+if not defined _valid (
+    echo [WARN] Invalid choice: "!PICK!"
+    goto :downgrade_menu
+)
+call :set_pin !PICK!
+echo(
+echo [INFO] Rebuilding with !PIN_VER! ...
+echo(
+goto :do_build
+
+:build_give_up
+echo(
+echo [ERROR] Build failed. ErrorLevel=!BUILD_ERR!
+popd >nul
+pause
+exit /b !BUILD_ERR!
+
+:build_ok
 echo ======================================
 echo   BUILD COMPLETE
 echo ======================================
@@ -702,94 +776,160 @@ pause
 exit
 
 REM -----------------------------
-REM :find_preferred_msvc -- discover a UE-safe MSVC toolchain version string.
-REM Prefers 14.38 then 14.39 into PREFERRED_MSVC_*. Failing that, records the
-REM highest 14.4x into FALLBACK_MSVC_* and the highest older 14.3x into
-REM LASTRESORT_MSVC_* so the caller can still pin a valid VS 2022 toolset
-REM instead of letting UBT pick a too-new compiler.
+REM :collect_msvc_toolsets -- build a version-sorted (highest first), de-duped
+REM list of every installed MSVC v14.x toolset into the pseudo-array
+REM MSVC_VER_1..N / MSVC_ROOT_1..N (MSVC_COUNT holds N). A version folder only
+REM counts if it actually contains the compiler (bin\Hostx64\x64\cl.exe):
+REM uninstalling a VS component can leave a hollow folder behind, and pinning
+REM one makes UBT fail with "Unable to find valid toolchain". Both vswhere and
+REM a filesystem fallback (for VS editions vswhere does not know, e.g. VS 2026)
+REM feed the same temp list, which is sorted with sort.exe then loaded here.
 REM -----------------------------
-:find_preferred_msvc
+:collect_msvc_toolsets
+set "MSVC_COUNT=0"
+set "MSVC_LIST_TMP=%TEMP%\GenerateAndBuild.msvc.txt"
+if exist "%MSVC_LIST_TMP%" del "%MSVC_LIST_TMP%" >nul 2>&1
+
 if exist "%VSWHERE%" (
     for /f "usebackq tokens=*" %%P in (`"%VSWHERE%" -products * -version [15.0^,^) -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2^>nul`) do (
-        call :scan_msvc_root "%%P\VC\Tools\MSVC"
+        call :emit_msvc_versions "%%P\VC\Tools\MSVC"
     )
 )
 
-if defined PREFERRED_MSVC_VERSION goto :find_preferred_msvc_done
-
-REM Fallback filesystem scan, mirroring the VS-detection fallback, for VS
-REM editions vswhere does not yet know about (e.g. VS 2026).
 for %%R in ("%ProgramFiles%\Microsoft Visual Studio" "%ProgramFiles(x86)%\Microsoft Visual Studio") do (
     if exist %%R (
         for /f "delims=" %%V in ('dir /b /ad %%R 2^>nul') do (
             for %%E in (Community Professional Enterprise BuildTools) do (
-                call :scan_msvc_root "%%~R\%%V\%%E\VC\Tools\MSVC"
+                call :emit_msvc_versions "%%~R\%%V\%%E\VC\Tools\MSVC"
             )
         )
     )
 )
 
-:find_preferred_msvc_done
+if not exist "%MSVC_LIST_TMP%" exit /b 0
+
+REM Sort descending by the version prefix (fixed 14.NN.NNNNN width, so lexical
+REM order equals numeric order) and load, skipping duplicate versions.
+set "PREV_VER="
+for /f "usebackq tokens=1,* delims=|" %%A in (`sort /r "%MSVC_LIST_TMP%"`) do (
+    if not "%%A"=="!PREV_VER!" (
+        set /a MSVC_COUNT+=1
+        set "MSVC_VER_!MSVC_COUNT!=%%A"
+        set "MSVC_ROOT_!MSVC_COUNT!=%%B"
+        set "PREV_VER=%%A"
+    )
+)
+del "%MSVC_LIST_TMP%" >nul 2>&1
 exit /b 0
 
 REM -----------------------------
-REM :scan_msvc_root <path> -- scan one Tools\MSVC dir. Highest 14.38 then
-REM highest 14.39 -> PREFERRED_MSVC_*; failing that, highest 14.4x ->
-REM FALLBACK_MSVC_*; failing that, highest older 14.3x -> LASTRESORT_MSVC_*.
-REM PREFERRED is a no-op once set; first root wins each tier. A version folder
-REM only counts if it actually contains the compiler (bin\Hostx64\x64\cl.exe):
-REM uninstalling a VS component can leave a hollow folder behind, and pinning
-REM one makes UBT fail with "Unable to find valid toolchain".
+REM :emit_msvc_versions <Tools\MSVC dir> -- append "version|fullpath" lines for
+REM every real (cl.exe-bearing) v14.x toolset in the given root to the temp
+REM list. Delayed !ROOT! expansion keeps parentheses in paths like
+REM "Program Files (x86)" from breaking the surrounding for/if block.
 REM -----------------------------
-:scan_msvc_root
-if defined PREFERRED_MSVC_VERSION exit /b 0
-set "MSVC_SCAN_ROOT=%~1"
-if not exist "!MSVC_SCAN_ROOT!\" exit /b 0
-
-for /f "delims=" %%T in ('dir /b /ad /o-n "!MSVC_SCAN_ROOT!\14.38*" 2^>nul') do (
-    if not defined PREFERRED_MSVC_VERSION if exist "!MSVC_SCAN_ROOT!\%%T\bin\Hostx64\x64\cl.exe" (
-        set "PREFERRED_MSVC_VERSION=%%T"
-        set "PREFERRED_MSVC_ROOT=!MSVC_SCAN_ROOT!\%%T"
+:emit_msvc_versions
+set "ROOT=%~1"
+if not exist "!ROOT!\" exit /b 0
+for /f "delims=" %%T in ('dir /b /ad "!ROOT!\14.*" 2^>nul') do (
+    if exist "!ROOT!\%%T\bin\Hostx64\x64\cl.exe" (
+        >>"%MSVC_LIST_TMP%" echo %%T^|!ROOT!\%%T
     )
 )
+exit /b 0
 
-if defined PREFERRED_MSVC_VERSION exit /b 0
+REM -----------------------------
+REM :msvc_minor <version> <outvar> -- extract the minor number (e.g. 39 from
+REM 14.39.33519) into the named variable, for numeric band comparisons.
+REM -----------------------------
+:msvc_minor
+for /f "tokens=2 delims=." %%A in ("%~1") do set "%~2=%%A"
+exit /b 0
 
-for /f "delims=" %%T in ('dir /b /ad /o-n "!MSVC_SCAN_ROOT!\14.39*" 2^>nul') do (
-    if not defined PREFERRED_MSVC_VERSION if exist "!MSVC_SCAN_ROOT!\%%T\bin\Hostx64\x64\cl.exe" (
-        set "PREFERRED_MSVC_VERSION=%%T"
-        set "PREFERRED_MSVC_ROOT=!MSVC_SCAN_ROOT!\%%T"
-    )
+REM -----------------------------
+REM :select_msvc_pin -- choose the toolset to pin from the collected list, given
+REM ENGINE_BAND. Always prefers the universal v14.38/v14.39 window; otherwise
+REM takes the highest toolset the band permits. If nothing in the band exists it
+REM pins the closest-available as best effort and warns it will likely fail.
+REM Sets PIN_VER / PIN_ROOT / PIN_IDX / MSVC_PIN_ARGS.
+REM -----------------------------
+:select_msvc_pin
+if !MSVC_COUNT! LSS 1 (
+    echo(
+    echo [WARN] No usable MSVC v14.x toolset detected. UBT will auto-select the
+    echo        newest installed compiler, which may be too new for this engine.
+    echo        In Visual Studio Installer ^> Individual components add
+    echo        "MSVC v143 - VS 2022 C++ x64/x86 build tools ^(v14.38-17.8^)".
+    echo(
+    exit /b 0
 )
 
-if defined PREFERRED_MSVC_VERSION exit /b 0
-
-REM No 14.38/14.39 in this root. Record the highest 14.4x as a fallback
-REM (still a VS 2022 toolset, so -Compiler=VisualStudio2022 stays valid), so a
-REM machine with only current VS 2022 (which ships 14.4x, not 14.38) still gets
-REM a safe pin instead of UBT defaulting to a too-new compiler. First root with
-REM a 14.4x wins; a later root holding a 14.38/14.39 still overrides via PREFERRED.
-if defined FALLBACK_MSVC_VERSION exit /b 0
-for /f "delims=" %%T in ('dir /b /ad /o-n "!MSVC_SCAN_ROOT!\14.4*" 2^>nul') do (
-    if not defined FALLBACK_MSVC_VERSION if exist "!MSVC_SCAN_ROOT!\%%T\bin\Hostx64\x64\cl.exe" (
-        set "FALLBACK_MSVC_VERSION=%%T"
-        set "FALLBACK_MSVC_ROOT=!MSVC_SCAN_ROOT!\%%T"
+REM Pass 1: the universal v14.38/v14.39 window (highest such), always engine-safe.
+for /L %%i in (1,1,!MSVC_COUNT!) do (
+    if not defined PIN_VER (
+        call :msvc_minor "!MSVC_VER_%%i!" _MNR
+        if "!_MNR!"=="39" call :set_pin %%i
+        if "!_MNR!"=="38" call :set_pin %%i
     )
 )
-
-if defined FALLBACK_MSVC_VERSION exit /b 0
-
-REM No 14.4x either. Record the highest remaining 14.3x (14.30-14.37) as a
-REM last resort: those build UE 5.0-5.6 fine but sit below UE 5.7's minimum
-REM of 14.38, so they must never outrank a 14.4x that UBT would have accepted.
-if defined LASTRESORT_MSVC_VERSION exit /b 0
-for /f "delims=" %%T in ('dir /b /ad /o-n "!MSVC_SCAN_ROOT!\14.3*" 2^>nul') do (
-    if not defined LASTRESORT_MSVC_VERSION if exist "!MSVC_SCAN_ROOT!\%%T\bin\Hostx64\x64\cl.exe" (
-        set "LASTRESORT_MSVC_VERSION=%%T"
-        set "LASTRESORT_MSVC_ROOT=!MSVC_SCAN_ROOT!\%%T"
-    )
+if defined PIN_VER (
+    echo [OK] Pinning UBT MSVC toolchain ^(universal v14.38/39^): !PIN_VER!
+    echo        !PIN_ROOT!
+    exit /b 0
 )
 
+REM Pass 2: the highest toolset permitted by the engine band.
+for /L %%i in (1,1,!MSVC_COUNT!) do (
+    if not defined PIN_VER (
+        call :msvc_minor "!MSVC_VER_%%i!" _MNR
+        set "_ok=1"
+        if "!ENGINE_BAND!"=="LOW"  if !_MNR! GEQ 40 set "_ok=0"
+        if "!ENGINE_BAND!"=="HIGH" if !_MNR! LSS 38 set "_ok=0"
+        if "!_ok!"=="1" call :set_pin %%i
+    )
+)
+if defined PIN_VER (
+    echo [OK] No v14.38/39 found; pinning best compatible for this engine: !PIN_VER!
+    echo        !PIN_ROOT!
+    if "!ENGINE_BAND!"=="LOW" echo        ^(engine is in the LOW band: staying below v14.40^)
+    exit /b 0
+)
+
+REM Nothing in the band. Pin the closest-available and warn it will likely fail.
+if "!ENGINE_BAND!"=="LOW" (
+    REM Only v14.40+ exist; the lowest of them is the least-bad choice.
+    call :set_pin !MSVC_COUNT!
+    echo [WARN] No v14.39-or-lower toolset found; this engine rejects v14.40+.
+    echo        Pinning the lowest available as best effort: !PIN_VER!
+    echo        Add the "MSVC v143 ... ^(v14.38^)" component for a clean build.
+) else (
+    REM HIGH band with only <=v14.37 installed.
+    call :set_pin 1
+    echo [WARN] Only v14.37-or-older toolsets found; this engine needs v14.38+.
+    echo        Pinning the highest available as best effort: !PIN_VER!
+    echo        Add the "MSVC v143 ... ^(v14.38^)" component for a clean build.
+)
+exit /b 0
+
+REM -----------------------------
+REM :set_pin <index> -- pin MSVC to the toolset at that array index. Used both
+REM for the initial selection and for the build-failure downgrade retries.
+REM -----------------------------
+:set_pin
+set "PIN_IDX=%~1"
+set "PIN_VER=!MSVC_VER_%~1!"
+set "PIN_ROOT=!MSVC_ROOT_%~1!"
+set "MSVC_PIN_ARGS=-Compiler=VisualStudio2022 -CompilerVersion=!PIN_VER!"
+exit /b 0
+
+REM -----------------------------
+REM :print_toolset <index> -- print one toolset menu row, marking the current pin.
+REM -----------------------------
+:print_toolset
+set "_i=%~1"
+set "_mark=  "
+if "!_i!"=="!PIN_IDX!" set "_mark=->"
+echo     !_mark! !_i!^) !MSVC_VER_%~1!
 exit /b 0
 
 REM -----------------------------
