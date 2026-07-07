@@ -13,7 +13,7 @@ REM -----------------------------
 REM Script version + update source
 REM (edit UPDATE_URL to point at any HTTPS-served copy of this file)
 REM -----------------------------
-set "SCRIPT_VERSION=4.2.2"
+set "SCRIPT_VERSION=4.2.3"
 set "UPDATE_URL=https://raw.githubusercontent.com/hookc123/GenerateAndBuild/main/GenerateAndBuild.bat"
 
 REM -----------------------------
@@ -786,6 +786,7 @@ REM feed the same temp list, which is sorted with sort.exe then loaded here.
 REM -----------------------------
 :collect_msvc_toolsets
 set "MSVC_COUNT=0"
+set "MSVC_SEEN_TOONEW="
 set "MSVC_LIST_TMP=%TEMP%\GenerateAndBuild.msvc.txt"
 if exist "%MSVC_LIST_TMP%" del "%MSVC_LIST_TMP%" >nul 2>&1
 
@@ -831,10 +832,26 @@ REM -----------------------------
 set "ROOT=%~1"
 if not exist "!ROOT!\" exit /b 0
 for /f "delims=" %%T in ('dir /b /ad "!ROOT!\14.*" 2^>nul') do (
-    if exist "!ROOT!\%%T\bin\Hostx64\x64\cl.exe" (
-        >>"%MSVC_LIST_TMP%" echo %%T^|!ROOT!\%%T
-    )
+    if exist "!ROOT!\%%T\bin\Hostx64\x64\cl.exe" call :emit_one "%%T" "!ROOT!\%%T"
 )
+exit /b 0
+
+REM -----------------------------
+REM :emit_one <version> <fullpath> -- record one toolset, but SKIP v14.50+ (VS
+REM 2026). Those are VisualStudio2026 toolsets, so the tool's hardcoded
+REM -Compiler=VisualStudio2022 pin cannot resolve them ("Unable to find valid
+REM <ver> toolchain for VisualStudio2022"), and they break UE 5.0-5.7 anyway.
+REM Skipping them means a VS-2026-only machine collects nothing, so the tool
+REM pins nothing and lets UBT auto-select (the safe pre-pin behavior). The
+REM MSVC_SEEN_TOONEW flag lets the caller explain why when the list ends empty.
+REM -----------------------------
+:emit_one
+call :msvc_minor "%~1" _EMNR
+if !_EMNR! GTR !MSVC_MAX_MINOR_UE5! (
+    set "MSVC_SEEN_TOONEW=1"
+    exit /b 0
+)
+>>"%MSVC_LIST_TMP%" echo %~1^|%~2
 exit /b 0
 
 REM -----------------------------
@@ -855,10 +872,18 @@ REM -----------------------------
 :select_msvc_pin
 if !MSVC_COUNT! LSS 1 (
     echo(
-    echo [WARN] No usable MSVC v14.x toolset detected. UBT will auto-select the
-    echo        newest installed compiler, which may be too new for this engine.
-    echo        In Visual Studio Installer ^> Individual components add
-    echo        "MSVC v143 - VS 2022 C++ x64/x86 build tools ^(v14.38-17.8^)".
+    if defined MSVC_SEEN_TOONEW (
+        echo [WARN] Only VS 2026 / MSVC v14.50+ toolsets were found. Those are too
+        echo        new to pin here ^(and break UE 5.0-5.7^), so the tool will NOT pin
+        echo        a compiler and lets UBT auto-select instead. For a pinned,
+        echo        engine-matched build, install "MSVC v143 - VS 2022 C++ x64/x86
+        echo        build tools ^(v14.38^)" from the Visual Studio Installer.
+    ) else (
+        echo [WARN] No usable MSVC v14.x toolset detected. UBT will auto-select the
+        echo        newest installed compiler, which may be too new for this engine.
+        echo        In Visual Studio Installer ^> Individual components add
+        echo        "MSVC v143 - VS 2022 C++ x64/x86 build tools ^(v14.38-17.8^)".
+    )
     echo(
     exit /b 0
 )
