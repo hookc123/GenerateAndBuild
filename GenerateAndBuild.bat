@@ -13,7 +13,7 @@ REM -----------------------------
 REM Script version + update source
 REM (edit UPDATE_URL to point at any HTTPS-served copy of this file)
 REM -----------------------------
-set "SCRIPT_VERSION=4.2.1"
+set "SCRIPT_VERSION=4.2.2"
 set "UPDATE_URL=https://raw.githubusercontent.com/hookc123/GenerateAndBuild/main/GenerateAndBuild.bat"
 
 REM -----------------------------
@@ -703,16 +703,16 @@ echo [OK] Project files generated.
 
 REM -----------------------------
 REM Step 2/2: Build the editor target.
-REM On failure, offer to retry with a lower MSVC toolset: auto-retry once with
-REM the next-lower installed toolset, then drop to a manual picker. This only
-REM helps a toolchain-mismatch failure (a too-new compiler); a genuine code
-REM error keeps failing and the user can quit the picker.
+REM On failure the tool does NOT assume a toolchain problem: most build failures
+REM are ordinary compile errors in the project's own code, which UBT prints in
+REM the output above and which no toolset change can fix. So it simply reports
+REM the failure and, only if the user explicitly asks (types "msvc"), opens a
+REM picker to rebuild with a different MSVC toolset. Pressing Enter closes it, so
+REM the user is never trapped guessing at toolsets for a bug in their own code.
 REM -----------------------------
 echo(
 echo [INFO] Step 2/2: Build %PROJECT_NAME%Editor Win64 Development...
 echo(
-
-set "AUTO_TRIED="
 
 :do_build
 call :run_ubt %PROJECT_NAME%Editor Win64 Development -project="%UPROJECT%" -waitmutex
@@ -721,44 +721,39 @@ echo(
 if "!BUILD_ERR!"=="0" goto :build_ok
 
 echo [ERROR] Build failed. ErrorLevel=!BUILD_ERR!
+echo(
+echo   The compiler errors are shown in the output above. Most build failures
+echo   are code errors that no toolchain change will fix: read the errors,
+echo   fix them, and re-run.
+echo(
 
-REM Is there a lower toolset to fall back to? (array is sorted high -> low)
-set "b_have_lower="
-if !MSVC_COUNT! GEQ 1 if !PIN_IDX! GEQ 1 if !PIN_IDX! LSS !MSVC_COUNT! set "b_have_lower=1"
+REM Nothing to switch to unless at least two toolsets exist.
+if !MSVC_COUNT! LSS 2 goto :build_give_up
 
-REM Auto-retry once with the next-lower toolset.
-if not defined AUTO_TRIED if defined b_have_lower (
-    set "AUTO_TRIED=1"
-    set /a _NEXT=!PIN_IDX!+1
-    call :set_pin !_NEXT!
-    echo(
-    echo [INFO] Auto-retrying with next-lower MSVC toolset: !PIN_VER!
-    echo(
-    goto :do_build
-)
-
-REM No lower toolset, or the auto-retry already ran: offer the manual picker.
-if !MSVC_COUNT! LSS 1 goto :build_give_up
-if not defined b_have_lower goto :build_give_up
+echo   If you believe this is instead an MSVC toolchain version mismatch, type
+echo   msvc to rebuild with a different toolset. Otherwise press Enter to close.
+echo(
+set "PICK="
+set /p "PICK=Your choice [msvc / Enter to quit]: "
+if /i not "!PICK!"=="msvc" goto :build_give_up
 
 :downgrade_menu
 echo(
-echo   The build failed with the current toolchain pin. If this is a
-echo   "compiler too new" mismatch, rebuilding with an older MSVC toolset
-echo   often fixes it. Installed toolsets ^(newest first^):
+echo   Installed MSVC toolsets ^(newest first, current pin marked ->^):
 echo(
 for /L %%i in (1,1,!MSVC_COUNT!) do call :print_toolset %%i
 echo(
-set "PICK="
-set /p "PICK=Pick a toolset to rebuild with [1-!MSVC_COUNT!], or Q to quit: "
-if /i "!PICK!"=="Q" goto :build_give_up
+set "PICK2="
+set /p "PICK2=Pick a toolset number to rebuild with, or Q to quit: "
+if /i "!PICK2!"=="Q" goto :build_give_up
+if not defined PICK2 goto :build_give_up
 set "_valid="
-for /L %%i in (1,1,!MSVC_COUNT!) do if "%%i"=="!PICK!" set "_valid=1"
+for /L %%i in (1,1,!MSVC_COUNT!) do if "%%i"=="!PICK2!" set "_valid=1"
 if not defined _valid (
-    echo [WARN] Invalid choice: "!PICK!"
+    echo [WARN] Invalid choice: "!PICK2!"
     goto :downgrade_menu
 )
-call :set_pin !PICK!
+call :set_pin !PICK2!
 echo(
 echo [INFO] Rebuilding with !PIN_VER! ...
 echo(
@@ -766,7 +761,7 @@ goto :do_build
 
 :build_give_up
 echo(
-echo [ERROR] Build failed. ErrorLevel=!BUILD_ERR!
+echo [ERROR] Build failed - see the compiler errors above. ErrorLevel=!BUILD_ERR!
 popd >nul
 pause
 exit /b !BUILD_ERR!
