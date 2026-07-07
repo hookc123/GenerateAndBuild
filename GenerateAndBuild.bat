@@ -13,25 +13,29 @@ REM -----------------------------
 REM Script version + update source
 REM (edit UPDATE_URL to point at any HTTPS-served copy of this file)
 REM -----------------------------
-set "SCRIPT_VERSION=4.2.0"
+set "SCRIPT_VERSION=4.2.1"
 set "UPDATE_URL=https://raw.githubusercontent.com/hookc123/GenerateAndBuild/main/GenerateAndBuild.bat"
 
 REM -----------------------------
 REM MSVC toolchain compatibility knobs (engine-aware pin).
-REM v14.38/v14.39 is the universal window every UE 5.x accepts and is ALWAYS
-REM preferred, so these two knobs only decide the fallback when no v14.38/39 is
-REM installed:
 REM   MSVC_NO_1440_MAX_MINOR : UE 5.x with minor <= this cannot build on MSVC
-REM                            v14.40+, so the pin stays at v14.39 or lower.
-REM   MSVC_NEED_1438_MIN_MINOR : UE 5.x with minor >= this needs v14.38+, so
-REM                              older toolsets are treated as too old.
-REM Both default to what is currently known (only UE 5.3 and older proven to
-REM reject v14.40+; UE 5.7+ proven to need v14.38+). If testing shows another
-REM version fails, just bump the number: e.g. if 5.6 also breaks on v14.40+,
-REM set MSVC_NO_1440_MAX_MINOR=6.
+REM                            v14.40+, so its pin stays at v14.39 or lower
+REM                            (LOW band). Proven for UE 5.3 and older.
+REM   MSVC_NEED_1438_MIN_MINOR : UE 5.x with minor >= this needs v14.38+ AND
+REM                              prefers the newest toolset (HIGH band), so it
+REM                              is pinned to the highest safe one installed,
+REM                              not the v14.38/39 minimum. Proven for UE 5.7+.
+REM   MSVC_MAX_MINOR_UE5 : highest MSVC minor considered safe for ANY UE5. v14.50+
+REM                        (VS 2026) breaks UE 5.0-5.7, so the pin never goes
+REM                        above this even for a newest-preferring HIGH engine.
+REM Engines between the two thresholds are the MID band: they keep the universal
+REM v14.38/39 window (the conservative choice while their exact limits are
+REM unconfirmed). If testing shows another version fails, just move a threshold:
+REM e.g. if 5.6 also breaks on v14.40+, set MSVC_NO_1440_MAX_MINOR=6.
 REM -----------------------------
 set "MSVC_NO_1440_MAX_MINOR=3"
 set "MSVC_NEED_1438_MIN_MINOR=7"
+set "MSVC_MAX_MINOR_UE5=49"
 
 REM -----------------------------
 REM Check for a newer version (silent on failure: offline, timeout, etc.)
@@ -864,7 +868,41 @@ if !MSVC_COUNT! LSS 1 (
     exit /b 0
 )
 
-REM Pass 1: the universal v14.38/v14.39 window (highest such), always engine-safe.
+REM HIGH band (e.g. UE 5.7+): the minimum is v14.38 but the engine PREFERS the
+REM newest toolset, so pin the highest installed within [38, MSVC_MAX_MINOR_UE5]
+REM (staying below v14.50, which breaks UE 5.0-5.7). This matches UBT's own
+REM unpinned pick and avoids the cosmetic "not a preferred version" warning.
+if "!ENGINE_BAND!"=="HIGH" (
+    for /L %%i in (1,1,!MSVC_COUNT!) do (
+        if not defined PIN_VER (
+            call :msvc_minor "!MSVC_VER_%%i!" _MNR
+            set "_ok=1"
+            if !_MNR! LSS 38 set "_ok=0"
+            if !_MNR! GTR !MSVC_MAX_MINOR_UE5! set "_ok=0"
+            if "!_ok!"=="1" call :set_pin %%i
+        )
+    )
+    if defined PIN_VER (
+        echo [OK] Pinning newest engine-preferred MSVC toolchain: !PIN_VER!
+        echo        !PIN_ROOT!
+        exit /b 0
+    )
+    REM Only too-old ^(^<v14.38^) or too-new ^(v14.50+^) installed: best effort, warn.
+    for /L %%i in (1,1,!MSVC_COUNT!) do (
+        if not defined PIN_VER (
+            call :msvc_minor "!MSVC_VER_%%i!" _MNR
+            if !_MNR! LEQ !MSVC_MAX_MINOR_UE5! call :set_pin %%i
+        )
+    )
+    if not defined PIN_VER call :set_pin !MSVC_COUNT!
+    echo [WARN] No v14.38-to-v14.!MSVC_MAX_MINOR_UE5! toolset found for this engine.
+    echo        Pinning best effort: !PIN_VER!
+    echo        Add the "MSVC v143 ... ^(v14.38^)" component for a clean build.
+    exit /b 0
+)
+
+REM LOW / MID: prefer the universal v14.38/v14.39 window (highest such), always
+REM engine-safe, then the highest the band allows.
 for /L %%i in (1,1,!MSVC_COUNT!) do (
     if not defined PIN_VER (
         call :msvc_minor "!MSVC_VER_%%i!" _MNR
@@ -878,13 +916,13 @@ if defined PIN_VER (
     exit /b 0
 )
 
-REM Pass 2: the highest toolset permitted by the engine band.
+REM No v14.38/39: highest the band allows (LOW excludes v14.40+; both exclude v14.50+).
 for /L %%i in (1,1,!MSVC_COUNT!) do (
     if not defined PIN_VER (
         call :msvc_minor "!MSVC_VER_%%i!" _MNR
         set "_ok=1"
-        if "!ENGINE_BAND!"=="LOW"  if !_MNR! GEQ 40 set "_ok=0"
-        if "!ENGINE_BAND!"=="HIGH" if !_MNR! LSS 38 set "_ok=0"
+        if "!ENGINE_BAND!"=="LOW" if !_MNR! GEQ 40 set "_ok=0"
+        if !_MNR! GTR !MSVC_MAX_MINOR_UE5! set "_ok=0"
         if "!_ok!"=="1" call :set_pin %%i
     )
 )
@@ -903,9 +941,8 @@ if "!ENGINE_BAND!"=="LOW" (
     echo        Pinning the lowest available as best effort: !PIN_VER!
     echo        Add the "MSVC v143 ... ^(v14.38^)" component for a clean build.
 ) else (
-    REM HIGH band with only <=v14.37 installed.
     call :set_pin 1
-    echo [WARN] Only v14.37-or-older toolsets found; this engine needs v14.38+.
+    echo [WARN] No band-compatible toolset found for this engine.
     echo        Pinning the highest available as best effort: !PIN_VER!
     echo        Add the "MSVC v143 ... ^(v14.38^)" component for a clean build.
 )
