@@ -13,7 +13,7 @@ REM -----------------------------
 REM Script version + update source
 REM (edit UPDATE_URL to point at any HTTPS-served copy of this file)
 REM -----------------------------
-set "SCRIPT_VERSION=4.2.3"
+set "SCRIPT_VERSION=4.2.4"
 set "UPDATE_URL=https://raw.githubusercontent.com/hookc123/GenerateAndBuild/main/GenerateAndBuild.bat"
 
 REM -----------------------------
@@ -481,6 +481,15 @@ for /f "tokens=2,*" %%A in ('reg query "HKLM\SOFTWARE\EpicGames\Unreal Engine\%E
     set "ENGINE_DIR=%%B"
 )
 
+REM Guard against a stale Launcher registry entry: the key can survive after the
+REM engine is uninstalled or moved, pointing at an empty/leftover folder. Probe
+REM for the real engine sentinel and clear ENGINE_DIR so the fallbacks below can
+REM find the actual install elsewhere instead of dead-ending on the stale path.
+if defined ENGINE_DIR if not exist "%ENGINE_DIR%\Engine\Build\BatchFiles\Build.bat" (
+    echo [WARNING] Registry lists %ENGINE_FOLDER% at "%ENGINE_DIR%" but no engine is there. Continuing search...
+    set "ENGINE_DIR="
+)
+
 REM (2) Source-build registry (GUID associations)
 if not defined ENGINE_DIR (
     for /f "tokens=2,*" %%A in ('reg query "HKCU\Software\Epic Games\Unreal Engine\Builds" /v "%ENGINE_ID%" 2^>nul ^| find /i "REG_SZ"') do (
@@ -491,6 +500,12 @@ if not defined ENGINE_DIR (
     for /f "tokens=2,*" %%A in ('reg query "HKLM\Software\Epic Games\Unreal Engine\Builds" /v "%ENGINE_ID%" 2^>nul ^| find /i "REG_SZ"') do (
         set "ENGINE_DIR=%%B"
     )
+)
+
+REM Same stale-entry guard for the source-build registry associations.
+if defined ENGINE_DIR if not exist "%ENGINE_DIR%\Engine\Build\BatchFiles\Build.bat" (
+    echo [WARNING] Registry lists %ENGINE_FOLDER% at "%ENGINE_DIR%" but no engine is there. Continuing search...
+    set "ENGINE_DIR="
 )
 
 REM (3) Per-drive depth-limited search: for each drive, check root, then
@@ -613,6 +628,15 @@ if "!ENGINE_MAJOR!"=="5" (
 )
 if not "!ENGINE_MAJOR!"=="0" echo [INFO] Engine version: !ENGINE_MAJOR!.!ENGINE_MINOR! ^(toolchain band: !ENGINE_BAND!^)
 
+REM Does this engine's UBT know the name "VisualStudio2026"? UE 5.7 was the first
+REM to split VS 2026 (major 18) into its own compiler family; every engine before
+REM it files a VS 2026 install under "VisualStudio2022" instead. Passing the newer
+REM name to an older UBT is a hard stop ("Unable to parse value for argument"), so
+REM the pin only uses it when the engine actually understands it.
+set "ENGINE_VS2026_OK=0"
+if !ENGINE_MAJOR! GTR 5 set "ENGINE_VS2026_OK=1"
+if "!ENGINE_MAJOR!"=="5" if !ENGINE_MINOR! GEQ 7 set "ENGINE_VS2026_OK=1"
+
 REM -----------------------------
 REM Preflight: pick a UE-safe MSVC toolset and pin UBT to it (engine-aware).
 REM UBT otherwise auto-selects the newest installed MSVC, which can be too new
@@ -627,6 +651,8 @@ REM -----------------------------
 set "MSVC_PIN_ARGS="
 set "PIN_VER="
 set "PIN_ROOT="
+set "PIN_FAM="
+set "PIN_COMPILER="
 set "PIN_IDX=0"
 set "MSVC_COUNT=0"
 if "!HAS_VS!"=="1" (
@@ -790,17 +816,32 @@ set "MSVC_SEEN_TOONEW="
 set "MSVC_LIST_TMP=%TEMP%\GenerateAndBuild.msvc.txt"
 if exist "%MSVC_LIST_TMP%" del "%MSVC_LIST_TMP%" >nul 2>&1
 
+REM Two vswhere passes, split on the VS major version, so each toolset is tagged
+REM with the compiler family UBT will file it under: major 18+ is VS 2026,
+REM anything older is VS 2022. A toolset under the wrong family is invisible to
+REM UBT no matter how correct its version number is.
 if exist "%VSWHERE%" (
-    for /f "usebackq tokens=*" %%P in (`"%VSWHERE%" -products * -version [15.0^,^) -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2^>nul`) do (
-        call :emit_msvc_versions "%%P\VC\Tools\MSVC"
+    for /f "usebackq tokens=*" %%P in (`"%VSWHERE%" -products * -version [18.0^,^) -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2^>nul`) do (
+        call :emit_msvc_versions "%%P\VC\Tools\MSVC" 2026
+    )
+    for /f "usebackq tokens=*" %%P in (`"%VSWHERE%" -products * -version [15.0^,18.0^) -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2^>nul`) do (
+        call :emit_msvc_versions "%%P\VC\Tools\MSVC" 2022
     )
 )
 
+REM Filesystem fallback. The directory under "Microsoft Visual Studio" is either a
+REM major version (18 and up = VS 2026) or a product year (2017/2019/2022), so a
+REM plain numeric compare separates the families: anything from 18 to 999 is a
+REM major version, four-digit years fall through to the VS 2022 family.
 for %%R in ("%ProgramFiles%\Microsoft Visual Studio" "%ProgramFiles(x86)%\Microsoft Visual Studio") do (
     if exist %%R (
         for /f "delims=" %%V in ('dir /b /ad %%R 2^>nul') do (
+            set "_fam=2022"
+            echo %%V|findstr /r "^[0-9][0-9]*$" >nul && (
+                if %%V GEQ 18 if %%V LSS 1000 set "_fam=2026"
+            )
             for %%E in (Community Professional Enterprise BuildTools) do (
-                call :emit_msvc_versions "%%~R\%%V\%%E\VC\Tools\MSVC"
+                call :emit_msvc_versions "%%~R\%%V\%%E\VC\Tools\MSVC" "!_fam!"
             )
         )
     )
@@ -809,13 +850,17 @@ for %%R in ("%ProgramFiles%\Microsoft Visual Studio" "%ProgramFiles(x86)%\Micros
 if not exist "%MSVC_LIST_TMP%" exit /b 0
 
 REM Sort descending by the version prefix (fixed 14.NN.NNNNN width, so lexical
-REM order equals numeric order) and load, skipping duplicate versions.
+REM order equals numeric order) and load, skipping duplicate versions. The family
+REM field sits between version and path so it never disturbs that ordering; when
+REM the same toolset version is installed under two VS families the reverse sort
+REM keeps the 2026 copy, which the older families accept as VS 2022 anyway.
 set "PREV_VER="
-for /f "usebackq tokens=1,* delims=|" %%A in (`sort /r "%MSVC_LIST_TMP%"`) do (
+for /f "usebackq tokens=1,2,* delims=|" %%A in (`sort /r "%MSVC_LIST_TMP%"`) do (
     if not "%%A"=="!PREV_VER!" (
         set /a MSVC_COUNT+=1
         set "MSVC_VER_!MSVC_COUNT!=%%A"
-        set "MSVC_ROOT_!MSVC_COUNT!=%%B"
+        set "MSVC_FAM_!MSVC_COUNT!=%%B"
+        set "MSVC_ROOT_!MSVC_COUNT!=%%C"
         set "PREV_VER=%%A"
     )
 )
@@ -823,27 +868,29 @@ del "%MSVC_LIST_TMP%" >nul 2>&1
 exit /b 0
 
 REM -----------------------------
-REM :emit_msvc_versions <Tools\MSVC dir> -- append "version|fullpath" lines for
-REM every real (cl.exe-bearing) v14.x toolset in the given root to the temp
-REM list. Delayed !ROOT! expansion keeps parentheses in paths like
+REM :emit_msvc_versions <Tools\MSVC dir> <family> -- append "version|family|path"
+REM lines for every real (cl.exe-bearing) v14.x toolset in the given root to the
+REM temp list. Delayed !ROOT! expansion keeps parentheses in paths like
 REM "Program Files (x86)" from breaking the surrounding for/if block.
 REM -----------------------------
 :emit_msvc_versions
 set "ROOT=%~1"
+set "FAM=%~2"
 if not exist "!ROOT!\" exit /b 0
 for /f "delims=" %%T in ('dir /b /ad "!ROOT!\14.*" 2^>nul') do (
-    if exist "!ROOT!\%%T\bin\Hostx64\x64\cl.exe" call :emit_one "%%T" "!ROOT!\%%T"
+    if exist "!ROOT!\%%T\bin\Hostx64\x64\cl.exe" call :emit_one "%%T" "!ROOT!\%%T" "!FAM!"
 )
 exit /b 0
 
 REM -----------------------------
-REM :emit_one <version> <fullpath> -- record one toolset, but SKIP v14.50+ (VS
-REM 2026). Those are VisualStudio2026 toolsets, so the tool's hardcoded
-REM -Compiler=VisualStudio2022 pin cannot resolve them ("Unable to find valid
-REM <ver> toolchain for VisualStudio2022"), and they break UE 5.0-5.7 anyway.
-REM Skipping them means a VS-2026-only machine collects nothing, so the tool
-REM pins nothing and lets UBT auto-select (the safe pre-pin behavior). The
+REM :emit_one <version> <fullpath> <family> -- record one toolset, but SKIP
+REM v14.50+: those ship with VS 2026 and break UE 5.0-5.7. Skipping them means a
+REM machine whose only toolset is v14.50+ collects nothing, so the tool pins
+REM nothing and lets UBT auto-select (the safe pre-pin behavior). The
 REM MSVC_SEEN_TOONEW flag lets the caller explain why when the list ends empty.
+REM Note this is a version cap, not a VS-edition one: an in-range toolset such as
+REM v14.44 installed under VS 2026 is kept, and the family tag is what lets the
+REM pin address it correctly.
 REM -----------------------------
 :emit_one
 call :msvc_minor "%~1" _EMNR
@@ -851,7 +898,7 @@ if !_EMNR! GTR !MSVC_MAX_MINOR_UE5! (
     set "MSVC_SEEN_TOONEW=1"
     exit /b 0
 )
->>"%MSVC_LIST_TMP%" echo %~1^|%~2
+>>"%MSVC_LIST_TMP%" echo %~1^|%~3^|%~2
 exit /b 0
 
 REM -----------------------------
@@ -867,13 +914,13 @@ REM :select_msvc_pin -- choose the toolset to pin from the collected list, given
 REM ENGINE_BAND. Always prefers the universal v14.38/v14.39 window; otherwise
 REM takes the highest toolset the band permits. If nothing in the band exists it
 REM pins the closest-available as best effort and warns it will likely fail.
-REM Sets PIN_VER / PIN_ROOT / PIN_IDX / MSVC_PIN_ARGS.
+REM Sets PIN_VER / PIN_ROOT / PIN_FAM / PIN_IDX / MSVC_PIN_ARGS.
 REM -----------------------------
 :select_msvc_pin
 if !MSVC_COUNT! LSS 1 (
     echo(
     if defined MSVC_SEEN_TOONEW (
-        echo [WARN] Only VS 2026 / MSVC v14.50+ toolsets were found. Those are too
+        echo [WARN] Only MSVC v14.50+ toolsets were found. Those are too
         echo        new to pin here ^(and break UE 5.0-5.7^), so the tool will NOT pin
         echo        a compiler and lets UBT auto-select instead. For a pinned,
         echo        engine-matched build, install "MSVC v143 - VS 2022 C++ x64/x86
@@ -976,7 +1023,16 @@ REM -----------------------------
 set "PIN_IDX=%~1"
 set "PIN_VER=!MSVC_VER_%~1!"
 set "PIN_ROOT=!MSVC_ROOT_%~1!"
-set "MSVC_PIN_ARGS=-Compiler=VisualStudio2022 -CompilerVersion=!PIN_VER!"
+set "PIN_FAM=!MSVC_FAM_%~1!"
+REM The version alone does not identify a toolset to UBT: it only searches the
+REM one compiler family it was told to use, so a toolset living under VS 2026
+REM asked for as VisualStudio2022 comes back "Unable to find valid <ver> C++
+REM toolchain". Name the family that actually hosts it, falling back to the 2022
+REM name on engines too old to parse the 2026 one (they file VS 2026 under
+REM VisualStudio2022 themselves, so the older name is the correct one there).
+set "PIN_COMPILER=VisualStudio2022"
+if "!PIN_FAM!"=="2026" if "!ENGINE_VS2026_OK!"=="1" set "PIN_COMPILER=VisualStudio2026"
+set "MSVC_PIN_ARGS=-Compiler=!PIN_COMPILER! -CompilerVersion=!PIN_VER!"
 exit /b 0
 
 REM -----------------------------
