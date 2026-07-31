@@ -13,7 +13,7 @@ REM -----------------------------
 REM Script version + update source
 REM (edit UPDATE_URL to point at any HTTPS-served copy of this file)
 REM -----------------------------
-set "SCRIPT_VERSION=4.2.4"
+set "SCRIPT_VERSION=4.2.5"
 set "UPDATE_URL=https://raw.githubusercontent.com/hookc123/GenerateAndBuild/main/GenerateAndBuild.bat"
 
 REM -----------------------------
@@ -36,6 +36,8 @@ REM -----------------------------
 set "MSVC_NO_1440_MAX_MINOR=3"
 set "MSVC_NEED_1438_MIN_MINOR=7"
 set "MSVC_MAX_MINOR_UE5=49"
+set "MSVC_UE57_BANNED_MIN_MINOR=40"
+set "MSVC_UE57_BANNED_MAX_MINOR=43"
 
 REM -----------------------------
 REM Check for a newer version (silent on failure: offline, timeout, etc.)
@@ -628,6 +630,12 @@ if "!ENGINE_MAJOR!"=="5" (
 )
 if not "!ENGINE_MAJOR!"=="0" echo [INFO] Engine version: !ENGINE_MAJOR!.!ENGINE_MINOR! ^(toolchain band: !ENGINE_BAND!^)
 
+REM UE 5.7 explicitly bans MSVC v14.40-v14.43 because of compiler issues.
+REM Remove that range before selection so neither the automatic pin nor the
+REM manual retry menu can send UBT a toolchain it has already rejected.
+set "ENGINE_BANS_1440_1443=0"
+if "!ENGINE_MAJOR!.!ENGINE_MINOR!"=="5.7" set "ENGINE_BANS_1440_1443=1"
+
 REM Does this engine's UBT know the name "VisualStudio2026"? UE 5.7 was the first
 REM to split VS 2026 (major 18) into its own compiler family; every engine before
 REM it files a VS 2026 install under "VisualStudio2022" instead. Passing the newer
@@ -813,6 +821,7 @@ REM -----------------------------
 :collect_msvc_toolsets
 set "MSVC_COUNT=0"
 set "MSVC_SEEN_TOONEW="
+set "MSVC_SEEN_BANNED="
 set "MSVC_LIST_TMP=%TEMP%\GenerateAndBuild.msvc.txt"
 if exist "%MSVC_LIST_TMP%" del "%MSVC_LIST_TMP%" >nul 2>&1
 
@@ -894,6 +903,10 @@ REM pin address it correctly.
 REM -----------------------------
 :emit_one
 call :msvc_minor "%~1" _EMNR
+if "!ENGINE_BANS_1440_1443!"=="1" if !_EMNR! GEQ !MSVC_UE57_BANNED_MIN_MINOR! if !_EMNR! LEQ !MSVC_UE57_BANNED_MAX_MINOR! (
+    set "MSVC_SEEN_BANNED=1"
+    exit /b 0
+)
 if !_EMNR! GTR !MSVC_MAX_MINOR_UE5! (
     set "MSVC_SEEN_TOONEW=1"
     exit /b 0
@@ -919,7 +932,12 @@ REM -----------------------------
 :select_msvc_pin
 if !MSVC_COUNT! LSS 1 (
     echo(
-    if defined MSVC_SEEN_TOONEW (
+    if defined MSVC_SEEN_BANNED (
+        echo [WARN] The installed MSVC toolsets are banned by UE 5.7.
+        echo        UE 5.7 rejects v14.!MSVC_UE57_BANNED_MIN_MINOR!-v14.!MSVC_UE57_BANNED_MAX_MINOR! because of compiler issues,
+        echo        so the tool will not pin one. Install MSVC v14.44.35207 or
+        echo        v14.38.33130 from Visual Studio Installer.
+    ) else if defined MSVC_SEEN_TOONEW (
         echo [WARN] Only MSVC v14.50+ toolsets were found. Those are too
         echo        new to pin here ^(and break UE 5.0-5.7^), so the tool will NOT pin
         echo        a compiler and lets UBT auto-select instead. For a pinned,
